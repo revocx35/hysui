@@ -1,0 +1,13 @@
+services:
+  hysui:
+    image: ghcr.io/revocx35/hysui:latest
+    # To build from source instead of pulling: docker compose up -d --build
+    build: .
+    container_name: hysui
+    restart: unless-stopped
+    # Host networking: the VPN sees real client addresses, can reach your LAN and
+    # IPv6, and Let's Encrypt's port-80 check works without extra mappings.
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./data:/data

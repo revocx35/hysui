@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hysui</title>
+  <link rel="icon" href="/assets/logo.svg">
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="/assets/logo.svg" alt="" width="26" height="26"> hysui</div>
+    <div class="server-info" id="server-info"></div>
+    <div class="spacer"></div>
+    <div class="menu">
+      <button class="btn" id="admin-btn" aria-haspopup="true" aria-expanded="false">Admin ▾</button>
+      <div class="menu-list" id="admin-menu" hidden>
+        <button id="change-pw">Change login</button>
+        <button id="logout">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <h1>Users</h1>
+      <input type="search" id="search" placeholder="Search users" aria-label="Search users">
+      <div class="spacer"></div>
+      <button class="btn primary" id="add-user">+ Add user</button>
+    </div>
+    <div class="card">
+      <table class="users">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Status</th>
+            <th>Live speed</th>
+            <th title="Download / upload limit">Limit (Mbps)</th>
+            <th>Data used</th>
+            <th title="May this user reach devices on your home network?">Home network</th>
+            <th>Enabled</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="users"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>No users yet. Add one to get a QR code for a phone.</div>
+    </div>
+  </main>
+
+  <footer id="footer"></footer>
+
+  <!-- add / edit user -->
+  <dialog id="user-dialog">
+    <form method="dialog" id="user-form">
+      <h2 id="user-title">Add user</h2>
+      <div class="field">
+        <label for="f-name">Name</label>
+        <input type="text" id="f-name" maxlength="32" pattern="[A-Za-z0-9_.\-]{1,32}" required autocomplete="off">
+        <div class="hint">Letters, digits, <code>_ . -</code>. Used in the client login; cannot be changed later.</div>
+      </div>
+      <div class="field">
+        <label for="f-password">Password</label>
+        <div class="inline">
+          <input type="text" id="f-password" maxlength="128" pattern="[A-Za-z0-9_.~\-]{8,128}" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn" id="f-generate">Generate</button>
+        </div>
+        <div class="hint" id="f-password-hint">Leave empty to generate one.</div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="f-down">Download limit (Mbps)</label>
+          <input type="number" id="f-down" min="0" step="any" placeholder="Unlimited">
+        </div>
+        <div class="field">
+          <label for="f-up">Upload limit (Mbps)</label>
+          <input type="number" id="f-up" min="0" step="any" placeholder="Unlimited">
+        </div>
+      </div>
+      <div class="field">
+        <label for="f-quota">Data quota (GB)</label>
+        <input type="number" id="f-quota" min="0" step="any" placeholder="Unlimited">
+        <div class="hint">Upload + download. The user is disconnected when it runs out; reset usage to restore.</div>
+      </div>
+      <div class="field">
+        <label for="f-note">Note</label>
+        <input type="text" id="f-note" maxlength="200" placeholder="Optional, e.g. whose phone this is">
+      </div>
+      <label class="check">
+        <div>Home network access<small>Reach devices on your LAN (router, NAS, printer…) through the VPN.</small></div>
+        <span class="switch"><input type="checkbox" id="f-home"><span></span></span>
+      </label>
+      <label class="check">
+        <div>Enabled<small>Disabled users cannot connect.</small></div>
+        <span class="switch"><input type="checkbox" id="f-enabled" checked><span></span></span>
+      </label>
+      <p class="error" id="user-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary" id="user-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- QR code -->
+  <dialog id="qr-dialog">
+    <div class="body">
+      <h2 id="qr-title">Connect</h2>
+      <div class="qr">
+        <img id="qr-img" alt="QR code for the client link">
+        <code id="qr-uri"></code>
+      </div>
+      <p class="muted">Scan with Hiddify, Karing, v2rayNG, Shadowrocket or another Hysteria 2 client, or copy the link.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="qr-copy">Copy link</button>
+        <button type="button" class="btn primary" data-close>Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- confirm -->
+  <dialog id="confirm-dialog">
+    <div class="body">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <p id="confirm-text"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="button" class="btn primary" id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- admin login -->
+  <dialog id="pw-dialog">
+    <form method="dialog" id="pw-form">
+      <h2>Change panel login</h2>
+      <div class="field">
+        <label for="pw-user">Username</label>
+        <input type="text" id="pw-user" maxlength="64" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="pw-current">Current password</label>
+        <input type="password" id="pw-current" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="pw-new">New password</label>
+        <input type="password" id="pw-new" minlength="10" maxlength="72" autocomplete="new-password" required>
+        <div class="hint">At least 10 characters. Other signed-in browsers are signed out.</div>
+      </div>
+      <p class="error" id="pw-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+</body>
+</html>

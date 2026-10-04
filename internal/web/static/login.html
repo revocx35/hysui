@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hysui · Sign in</title>
+  <link rel="icon" href="/assets/logo.svg">
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/login.js" defer></script>
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="card login" id="login">
+      <div class="brand"><img src="/assets/logo.svg" alt="" width="30" height="30"> hysui</div>
+      <div class="field">
+        <label for="username">Username</label>
+        <input type="text" id="username" autocomplete="username" required autofocus>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" autocomplete="current-password" required>
+      </div>
+      <button class="btn primary" type="submit">Sign in</button>
+      <p class="error" id="error" role="alert"></p>
+    </form>
+  </div>
+</body>
+</html>

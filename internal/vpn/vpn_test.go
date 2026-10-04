@@ -1,0 +1,486 @@
+package vpn
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/netip"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/apernet/hysteria/core/v2/client"
+
+	"github.com/revocx35/hysui/internal/netpolicy"
+	"github.com/revocx35/hysui/internal/store"
+)
+
+// The test network: 127.0.0.1 plays "the internet", 127.0.0.2 plays the home LAN.
+const (
+	inetIP = "127.0.0.1"
+	homeIP = "127.0.0.2"
+	pass   = "testpassword123"
+)
+
+type env struct {
+	t      *testing.T
+	store  *store.Store
+	mgr    *Manager
+	server net.Addr
+	inet   string // HTTP target on the "internet"
+	home   string // HTTP target on the "home network"
+	inetU  string // UDP echo on the "internet"
+	homeU  string // UDP echo on the "home network"
+}
+
+func newEnv(t *testing.T, users ...store.User) *env {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "hysui.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range users {
+		if u.Password == "" {
+			u.Password = pass
+		}
+		if err := st.Add(u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := netpolicy.New(nil, []netip.Prefix{netip.MustParsePrefix(homeIP + "/32")})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(st, policy, log)
+	certs, err := NewSelfSigned(dir, "hysui.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	masq, _ := Masquerade("")
+	srv, err := NewServerConn(pc, mgr, certs, masq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	return &env{
+		t: t, store: st, mgr: mgr, server: pc.LocalAddr(),
+		inet: startHTTP(t, inetIP), home: startHTTP(t, homeIP),
+		inetU: startEcho(t, inetIP), homeU: startEcho(t, homeIP),
+	}
+}
+
+// startHTTP serves /bytes?n=N (N zero bytes), /sink (discards the body) and /hold
+// (keeps the connection open, echoing lines).
+func startHTTP(t *testing.T, ip string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", ip+":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/bytes", func(w http.ResponseWriter, r *http.Request) {
+		var n int64
+		fmt.Sscan(r.URL.Query().Get("n"), &n)
+		w.Header().Set("Content-Length", fmt.Sprint(n))
+		_, _ = io.CopyN(w, zeroReader{}, n)
+	})
+	mux.HandleFunc("/sink", func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		fmt.Fprint(w, n)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "hello from "+ip) })
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String()
+}
+
+func startEcho(t *testing.T, ip string) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", ip+":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo(buf[:n], addr)
+		}
+	}()
+	t.Cleanup(func() { _ = pc.Close() })
+	return pc.LocalAddr().String()
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(b []byte) (int, error) { clear(b); return len(b), nil }
+
+func (e *env) connect(user, password string) (client.Client, error) {
+	c, _, err := client.NewClient(&client.Config{
+		ServerAddr: e.server,
+		Auth:       user + ":" + password,
+		TLSConfig:  client.TLSConfig{ServerName: "hysui.test", InsecureSkipVerify: true},
+	})
+	return c, err
+}
+
+func (e *env) mustConnect(user string) client.Client {
+	e.t.Helper()
+	c, err := e.connect(user, pass)
+	if err != nil {
+		e.t.Fatalf("connect %s: %v", user, err)
+	}
+	e.t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func httpVia(c client.Client) *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext:       func(_ context.Context, _, addr string) (net.Conn, error) { return c.TCP(addr) },
+			DisableKeepAlives: true,
+		},
+	}
+}
+
+func get(c client.Client, url string) (string, error) {
+	resp, err := httpVia(c).Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return string(b), err
+}
+
+func udpEcho(t *testing.T, c client.Client, target string) bool {
+	t.Helper()
+	u, err := c.UDP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	got := make(chan []byte, 1)
+	go func() {
+		b, _, err := u.Receive()
+		if err == nil {
+			got <- b
+		}
+	}()
+	for range 3 {
+		if err := u.Send([]byte("ping"), target); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case b := <-got:
+			return string(b) == "ping"
+		case <-time.After(400 * time.Millisecond):
+		}
+	}
+	return false
+}
+
+func TestHomeAccessPerUser(t *testing.T) {
+	e := newEnv(t,
+		store.User{Name: "lan", Enabled: true, HomeAccess: true},
+		store.User{Name: "nolan", Enabled: true, HomeAccess: false},
+	)
+	lan, nolan := e.mustConnect("lan"), e.mustConnect("nolan")
+
+	if body, err := get(lan, "http://"+e.home+"/"); err != nil || body != "hello from "+homeIP {
+		t.Fatalf("lan -> home: %q %v", body, err)
+	}
+	if body, err := get(nolan, "http://"+e.inet+"/"); err != nil || body != "hello from "+inetIP {
+		t.Fatalf("nolan -> internet: %q %v", body, err)
+	}
+	if body, err := get(nolan, "http://"+e.home+"/"); err == nil {
+		t.Fatalf("nolan reached the home network: %q", body)
+	}
+
+	// Many interleaved requests from both users: the per-goroutine user binding must
+	// never hand one user's access to the other.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []string
+	for i := range 40 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := get(lan, "http://"+e.home+"/"); err != nil {
+				mu.Lock()
+				failures = append(failures, fmt.Sprintf("lan #%d denied: %v", i, err))
+				mu.Unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := get(nolan, "http://"+e.home+"/"); err == nil {
+				mu.Lock()
+				failures = append(failures, fmt.Sprintf("nolan #%d reached home", i))
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if len(failures) > 0 {
+		t.Fatalf("%d mix-ups, first: %s", len(failures), failures[0])
+	}
+}
+
+func TestHomeAccessUDP(t *testing.T) {
+	e := newEnv(t,
+		store.User{Name: "lan", Enabled: true, HomeAccess: true},
+		store.User{Name: "nolan", Enabled: true},
+	)
+	lan, nolan := e.mustConnect("lan"), e.mustConnect("nolan")
+	if !udpEcho(t, lan, e.homeU) {
+		t.Fatal("lan: no UDP echo from home")
+	}
+	if !udpEcho(t, nolan, e.inetU) {
+		t.Fatal("nolan: no UDP echo from internet")
+	}
+	if udpEcho(t, nolan, e.homeU) {
+		t.Fatal("nolan: got UDP echo from home")
+	}
+}
+
+func TestRevokeHomeAccessCutsLiveConnection(t *testing.T) {
+	e := newEnv(t, store.User{Name: "lan", Enabled: true, HomeAccess: true})
+	c := e.mustConnect("lan")
+	conn, err := c.TCP(e.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	br := bytes.NewBufferString("GET /bytes?n=10 HTTP/1.1\r\nHost: x\r\n\r\n")
+	if _, err := io.Copy(conn, br); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 512)
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatalf("first response: %v", err)
+	}
+
+	if _, err := e.store.Update("lan", func(u *store.User) error { u.HomeAccess = false; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	e.mgr.Sync()
+
+	_, _ = conn.Write([]byte("GET /bytes?n=10 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if n, err := conn.Read(buf); err == nil {
+		t.Fatalf("connection still works after revoke: %q", buf[:n])
+	}
+	if _, err := get(c, "http://"+e.home+"/"); err == nil {
+		t.Fatal("new home connection allowed after revoke")
+	}
+	if _, err := get(c, "http://"+e.inet+"/"); err != nil {
+		t.Fatalf("internet broken after revoke: %v", err)
+	}
+}
+
+func timeDownload(t *testing.T, c client.Client, target string, n int) time.Duration {
+	t.Helper()
+	start := time.Now()
+	body, err := get(c, fmt.Sprintf("http://%s/bytes?n=%d", target, n))
+	if err != nil || len(body) != n {
+		t.Fatalf("download: %d bytes, %v", len(body), err)
+	}
+	return time.Since(start)
+}
+
+func timeUpload(t *testing.T, c client.Client, target string, n int) time.Duration {
+	t.Helper()
+	start := time.Now()
+	resp, err := httpVia(c).Post("http://"+target+"/sink", "application/octet-stream", io.LimitReader(zeroReader{}, int64(n)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.TrimSpace(string(b)) != fmt.Sprint(n) {
+		t.Fatalf("upload: server got %s bytes", b)
+	}
+	return time.Since(start)
+}
+
+func TestSpeedLimits(t *testing.T) {
+	e := newEnv(t,
+		store.User{Name: "slow", Enabled: true, DownMbps: 8, UpMbps: 4},
+		store.User{Name: "fast", Enabled: true},
+	)
+	slow, fast := e.mustConnect("slow"), e.mustConnect("fast")
+	const size = 3 << 20
+
+	// Margins are wide so slow CI runners (and -race) don't flake; the limited and
+	// unlimited cases are still far apart.
+	// 8 Mbps = 1 MB/s with a 200 KB burst: 3 MiB takes ~2.9 s.
+	if d := timeDownload(t, slow, e.inet, size); d < 2600*time.Millisecond || d > 8*time.Second {
+		t.Errorf("limited download of 3 MiB took %v, want ~2.9s", d)
+	}
+	if d := timeDownload(t, fast, e.inet, size); d > 2*time.Second {
+		t.Errorf("unlimited download took %v", d)
+	}
+	// 4 Mbps = 500 KB/s with a 100 KB burst: 1.5 MiB takes ~2.9 s.
+	if d := timeUpload(t, slow, e.inet, 3<<19); d < 2600*time.Millisecond || d > 8*time.Second {
+		t.Errorf("limited upload of 1.5 MiB took %v, want ~2.9s", d)
+	}
+
+	// Removing the limit applies to the live session.
+	if _, err := e.store.Update("slow", func(u *store.User) error { u.DownMbps = 0; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	e.mgr.Sync()
+	if d := timeDownload(t, slow, e.inet, size); d > 2*time.Second {
+		t.Errorf("download after removing limit took %v", d)
+	}
+}
+
+func TestQuota(t *testing.T) {
+	e := newEnv(t, store.User{Name: "q", Enabled: true, QuotaBytes: 256 << 10})
+	c := e.mustConnect("q")
+	if _, err := get(c, fmt.Sprintf("http://%s/bytes?n=%d", e.inet, 1<<20)); err == nil {
+		t.Fatal("download past the quota succeeded")
+	}
+	if !e.mgr.Stats()["q"].OverQuota {
+		t.Fatal("user not marked over quota")
+	}
+	if _, err := e.connect("q", pass); err == nil {
+		t.Fatal("over-quota user could reconnect")
+	}
+	if err := e.mgr.ResetUsage("q"); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := e.connect("q", pass)
+	if err != nil {
+		t.Fatalf("reconnect after reset: %v", err)
+	}
+	defer c2.Close()
+}
+
+func TestAuth(t *testing.T) {
+	e := newEnv(t,
+		store.User{Name: "on", Enabled: true},
+		store.User{Name: "off", Enabled: false},
+	)
+	if _, err := e.connect("on", "wrongpassword"); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	if _, err := e.connect("off", pass); err == nil {
+		t.Fatal("disabled user accepted")
+	}
+	if _, err := e.connect("ghost", pass); err == nil {
+		t.Fatal("unknown user accepted")
+	}
+	c := e.mustConnect("on")
+
+	// Disabling a connected user cuts their traffic.
+	if _, err := e.store.Update("on", func(u *store.User) error { u.Enabled = false; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	e.mgr.Sync()
+	if _, err := get(c, "http://"+e.inet+"/"); err == nil {
+		t.Fatal("disabled user still has traffic")
+	}
+}
+
+func TestKickAndStats(t *testing.T) {
+	e := newEnv(t, store.User{Name: "k", Enabled: true})
+	c := e.mustConnect("k")
+	if _, err := get(c, fmt.Sprintf("http://%s/bytes?n=%d", e.inet, 100000)); err != nil {
+		t.Fatal(err)
+	}
+	s := e.mgr.Stats()["k"]
+	if s.Online != 1 || s.Rx < 100000 || s.Tx == 0 {
+		t.Fatalf("stats = %+v", s)
+	}
+	e.mgr.Kick("k")
+	if _, err := get(c, "http://"+e.inet+"/"); err == nil {
+		t.Fatal("kicked client still works")
+	}
+	if _, err := e.connect("k", pass); err == nil {
+		t.Fatal("reconnect inside kick window succeeded")
+	}
+	time.Sleep(kickWindow + 200*time.Millisecond)
+	c2, err := e.connect("k", pass)
+	if err != nil {
+		t.Fatalf("reconnect after kick window: %v", err)
+	}
+	defer c2.Close()
+
+	if err := e.mgr.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := e.store.User("k"); u.UsedRx < 100000 {
+		t.Fatalf("usage not persisted: %+v", u)
+	}
+}
+
+func TestGoid(t *testing.T) {
+	a := goid()
+	if a == 0 || a != goid() {
+		t.Fatalf("goid unstable: %d", a)
+	}
+	ch := make(chan uint64)
+	go func() { ch <- goid() }()
+	if b := <-ch; b == 0 || b == a {
+		t.Fatalf("goroutines share id: %d %d", a, b)
+	}
+}
+
+func TestShareLink(t *testing.T) {
+	u := store.User{Name: "iphone", Password: "abc-DEF_123.xyz"}
+	got := ShareLink(LinkOptions{Host: "vpn.example.com", Port: 443}, u)
+	want := "hysteria2://iphone:abc-DEF_123.xyz@vpn.example.com:443/?sni=vpn.example.com#iphone"
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	got = ShareLink(LinkOptions{Host: "h", Port: 8443, Pin: "ab12"}, u)
+	if !strings.Contains(got, "insecure=1") || !strings.Contains(got, "pinSHA256=ab12") {
+		t.Fatalf("self-signed link missing pin: %s", got)
+	}
+}
+
+func TestACMEStatusReportsFailure(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	src, err := NewACME(ACMEOptions{
+		Domain: "hysui.invalid", CA: "https://127.0.0.1:1/directory", Challenge: "http",
+		AltPort: 1, Dir: t.TempDir(),
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := src.Status(); s.State != "pending" || s.Mode != "acme-http" {
+		t.Fatalf("initial status = %+v", s)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		s := src.Status()
+		if s.State == "error" && s.Error != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status never reported the failure: %+v", s)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if src.PinSHA256() != "" {
+		t.Fatal("ACME certificates must not be pinned")
+	}
+}
