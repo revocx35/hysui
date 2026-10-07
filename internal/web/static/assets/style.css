@@ -106,6 +106,7 @@ input:focus-visible, .btn:focus-visible, .switch input:focus-visible + span { ou
 .pill.ok { background: var(--ok-soft); color: var(--ok); }
 .pill.warn { background: var(--warn-soft); color: var(--warn); }
 .pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.accent { background: var(--accent-soft); color: var(--accent); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
 /* ---- users table ---- */
@@ -162,6 +163,24 @@ dialog h2 { margin: 0 0 14px; font-size: 18px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .inline { display: flex; gap: 6px; }
 .error { color: var(--bad); min-height: 1.2em; margin: 6px 0 0; }
+dialog.wide { width: min(600px, calc(100vw - 24px)); }
+dialog form.domain-add { padding: 0; }
+.domains { list-style: none; margin: 0 0 16px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); }
+.domains li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.domains li:last-child { border-bottom: 0; }
+.domains .grow { flex: 1; min-width: 0; }
+.dname { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow-wrap: anywhere; }
+.domains .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.derr {
+  color: var(--bad); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.bad-text { color: var(--bad); }
+.msg { min-height: 1.2em; margin: 0; }
+.msg.bad { color: var(--bad); }
+@media (max-width: 560px) {
+  .domains li { flex-direction: column; align-items: stretch; }
+}
 .qr { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .qr img { width: 260px; height: 260px; background: #fff; padding: 8px; border-radius: 8px; image-rendering: pixelated; }
 .qr code { word-break: break-all; font-size: 12px; background: var(--bg); padding: 8px; border-radius: 8px; width: 100%; }

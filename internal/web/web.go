@@ -2,6 +2,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -37,12 +39,13 @@ type Options struct {
 	Manager        *vpn.Manager
 	Certs          vpn.CertSource
 	Policy         *netpolicy.Policy
-	Link           vpn.LinkOptions
+	PublicPort     int    // UDP port in share links
 	Listen         string // VPN UDP listen address, for display
 	TrustedProxies []netip.Prefix
 	SecureCookies  string // auto, true, false
 	Log            *slog.Logger
 	Now            func() time.Time
+	LookupHost     func(ctx context.Context, host string) ([]string, error) // DNS, replaced by tests
 }
 
 // Server is the panel's HTTP handler.
@@ -58,6 +61,9 @@ type Server struct {
 func New(o Options) *Server {
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.LookupHost == nil {
+		o.LookupHost = net.DefaultResolver.LookupHost
 	}
 	s := &Server{o: o, sessions: NewSessions(o.Now), throttle: NewThrottle(o.Now), started: o.Now(), mux: http.NewServeMux()}
 	static, _ := fs.Sub(staticFS, "static")
@@ -87,6 +93,10 @@ func New(o Options) *Server {
 	api("POST /api/users/{name}/kick", s.kickUser)
 	api("POST /api/users/{name}/reset-usage", s.resetUsage)
 	api("GET /api/users/{name}/link", s.userLink)
+	api("GET /api/domains", s.listDomains)
+	api("POST /api/domains", s.addDomain)
+	api("POST /api/domains/{name}/activate", s.activateDomain)
+	api("DELETE /api/domains/{name}", s.deleteDomain)
 	api("POST /api/admin/password", s.changePassword)
 	return s
 }
@@ -292,12 +302,13 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	for _, p := range s.o.Policy.Local() {
 		local = append(local, p.String())
 	}
+	domain := s.o.Store.Domains().Active
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":    s.o.Version,
-		"domain":     s.o.Link.Host,
-		"port":       s.o.Link.Port,
+		"domain":     domain,
+		"port":       s.o.PublicPort,
 		"listen":     s.o.Listen,
-		"cert":       s.o.Certs.Status(),
+		"cert":       s.o.Certs.Status(domain),
 		"uptimeSec":  int(s.o.Now().Sub(s.started).Seconds()),
 		"users":      len(users),
 		"online":     online,
@@ -453,8 +464,7 @@ func (s *Server) userLink(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, store.ErrNotFound.Error())
 		return
 	}
-	link := s.o.Link
-	link.Pin = s.o.Certs.PinSHA256()
+	link := vpn.LinkOptions{Host: s.o.Store.Domains().Active, Port: s.o.PublicPort, Pin: s.o.Certs.PinSHA256()}
 	uri := vpn.ShareLink(link, u)
 	png, err := qrcode.Encode(uri, qrcode.Medium, 320)
 	if err != nil {
@@ -465,4 +475,111 @@ func (s *Server) userLink(w http.ResponseWriter, r *http.Request) {
 		"uri": uri,
 		"qr":  "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
 	})
+}
+
+// ---- domains ----
+
+type domainView struct {
+	Name     string         `json:"name"`
+	Active   bool           `json:"active"`
+	Cert     vpn.CertStatus `json:"cert"`
+	Addrs    []string       `json:"addrs"`
+	DNSError string         `json:"dnsError,omitempty"`
+}
+
+func (s *Server) listDomains(w http.ResponseWriter, r *http.Request) {
+	d := s.o.Store.Domains()
+	out := make([]domainView, len(d.List))
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i, name := range d.List {
+		out[i] = domainView{Name: name, Active: name == d.Active, Cert: s.o.Certs.Status(name), Addrs: []string{}}
+		wg.Go(func() {
+			host := name
+			if _, err := netip.ParseAddr(name); err != nil {
+				host += "." // fully qualified, so a search domain with a wildcard can't answer instead
+			}
+			addrs, err := s.o.LookupHost(ctx, host)
+			if err != nil {
+				out[i].DNSError = dnsError(err)
+				return
+			}
+			out[i].Addrs = addrs
+		})
+	}
+	wg.Wait()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active":  d.Active,
+		"port":    s.o.PublicPort,
+		"mode":    s.o.Certs.Status(d.Active).Mode,
+		"domains": out,
+	})
+}
+
+func dnsError(err error) string {
+	var de *net.DNSError
+	switch {
+	case !errors.As(err, &de):
+		return err.Error()
+	case de.IsNotFound:
+		return "no DNS record"
+	case de.IsTimeout:
+		return "DNS lookup timed out"
+	}
+	return de.Err
+}
+
+// syncDomains hands the domain list to the certificate source, which starts getting
+// certificates for new domains and stops renewing removed ones.
+func (s *Server) syncDomains() {
+	d := s.o.Store.Domains()
+	s.o.Certs.SetDomains(d.Active, d.List)
+}
+
+func (s *Server) addDomain(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	name, err := s.o.Store.AddDomain(in.Name)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrDomainExists) {
+			code = http.StatusConflict
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+	s.syncDomains()
+	s.o.Log.Info("domain added", "domain", name)
+	writeJSON(w, http.StatusCreated, map[string]string{"name": name})
+}
+
+func (s *Server) activateDomain(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.o.Store.SetActiveDomain(name); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	s.syncDomains()
+	s.o.Log.Info("active domain changed", "domain", name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteDomain(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.o.Store.DeleteDomain(name); err != nil {
+		code := http.StatusNotFound
+		if errors.Is(err, store.ErrDomainActive) {
+			code = http.StatusConflict
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
+	s.syncDomains()
+	s.o.Log.Info("domain removed", "domain", name)
+	w.WriteHeader(http.StatusNoContent)
 }

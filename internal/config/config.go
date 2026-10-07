@@ -22,7 +22,7 @@ const (
 
 // Config holds all settings.
 type Config struct {
-	Domain     string // public hostname of the VPN, used for certificates and share links
+	Domain     string // first domain on first start; the panel manages domains after that
 	Listen     string // UDP address of the VPN
 	PublicPort int    // UDP port in share links (if the router maps a different port)
 
@@ -71,9 +71,6 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		LogLevel:      strings.ToLower(env("LOG_LEVEL", "info")),
 	}
 	var errs []error
-	if c.Domain == "" {
-		errs = append(errs, errors.New("HYSUI_DOMAIN is required (the public hostname clients connect to)"))
-	}
 	_, lp, err := net.SplitHostPort(c.Listen)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("HYSUI_LISTEN: %w", err))

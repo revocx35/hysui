@@ -13,6 +13,7 @@
     <div class="brand"><img src="/assets/logo.svg" alt="" width="26" height="26"> hysui</div>
     <div class="server-info" id="server-info"></div>
     <div class="spacer"></div>
+    <button class="btn" id="domains-btn">Domains</button>
     <div class="menu">
       <button class="btn" id="admin-btn" aria-haspopup="true" aria-expanded="false">Admin ▾</button>
       <div class="menu-list" id="admin-menu" hidden>
@@ -114,6 +115,29 @@
       <p class="muted">Scan with Hiddify, Karing, v2rayNG, Shadowrocket or another Hysteria 2 client, or copy the link.</p>
       <div class="dialog-actions">
         <button type="button" class="btn" id="qr-copy">Copy link</button>
+        <button type="button" class="btn primary" data-close>Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- domains -->
+  <dialog id="domains-dialog" class="wide">
+    <div class="body">
+      <h2>Domains</h2>
+      <p class="muted">New QR codes and links use the active domain. The other domains keep working for devices that were set up with them, so you can move users over gradually.</p>
+      <ul class="domains" id="domain-list"></ul>
+      <form class="domain-add" id="domain-form">
+        <div class="field">
+          <label for="d-name">Add a domain</label>
+          <div class="inline">
+            <input type="text" id="d-name" maxlength="253" placeholder="vpn.example.com" autocomplete="off" spellcheck="false" required>
+            <button type="submit" class="btn">Add</button>
+          </div>
+          <div class="hint" id="d-hint"></div>
+        </div>
+      </form>
+      <p class="msg" id="domain-msg" role="status"></p>
+      <div class="dialog-actions">
         <button type="button" class="btn primary" data-close>Done</button>
       </div>
     </div>

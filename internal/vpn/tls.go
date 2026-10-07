@@ -26,10 +26,14 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// CertSource provides the server certificate and reports its state.
+// CertSource provides the server certificate for each domain and reports its state.
 type CertSource interface {
 	GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
-	Status() CertStatus
+	// SetDomains sets the domains clients connect to. Handshakes for any other name
+	// (or none, or an IP) get the active domain's certificate.
+	SetDomains(active string, all []string)
+	// Status describes the certificate served for domain.
+	Status(domain string) CertStatus
 	// PinSHA256 is the hex SHA-256 of the certificate for clients to pin, or "" when
 	// the certificate is publicly trusted.
 	PinSHA256() string
@@ -97,9 +101,16 @@ func (f *fileCert) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error
 	return c, nil
 }
 
-func (f *fileCert) Status() CertStatus {
+// SetDomains does nothing: the files decide which names are covered.
+func (f *fileCert) SetDomains(string, []string) {}
+
+func (f *fileCert) Status(domain string) CertStatus {
 	c, err := f.load(false)
-	return statusOf("file", c, err)
+	s := statusOf("file", c, err)
+	if s.State == "ok" && c.Leaf != nil && c.Leaf.VerifyHostname(domain) != nil {
+		s.State, s.Error = "error", "the certificate does not cover "+domain
+	}
+	return s
 }
 
 func (f *fileCert) PinSHA256() string { return "" }
@@ -181,14 +192,16 @@ func (s *selfSigned) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, err
 	return &s.cert, nil
 }
 
-func (s *selfSigned) Status() CertStatus { return statusOf("self-signed", &s.cert, nil) }
-func (s *selfSigned) PinSHA256() string  { return s.pin }
+// SetDomains does nothing: clients pin the certificate, so its names don't matter.
+func (s *selfSigned) SetDomains(string, []string) {}
+
+func (s *selfSigned) Status(string) CertStatus { return statusOf("self-signed", &s.cert, nil) }
+func (s *selfSigned) PinSHA256() string        { return s.pin }
 
 // ---- ACME ----
 
 // ACMEOptions configures Let's Encrypt (or another ACME CA).
 type ACMEOptions struct {
-	Domain    string
 	Email     string
 	CA        string // "letsencrypt", "letsencrypt-staging" or a directory URL
 	Challenge string // "http" or "tls"
@@ -197,17 +210,28 @@ type ACMEOptions struct {
 }
 
 type acmeCert struct {
-	cfg    *certmagic.Config
-	cache  *certmagic.Cache
-	domain string
-	mode   string
+	cfg   *certmagic.Config
+	cache *certmagic.Cache
+	mode  string
+	log   *slog.Logger
+	// obtain lets one domain at a time talk to the CA. Concurrent first-time account
+	// registrations race inside certmagic (its email prompt writes package globals).
+	obtain chan struct{}
 
-	mu  sync.Mutex
-	err error
+	mu      sync.Mutex
+	active  string
+	domains map[string]*acmeDomain
 }
 
-// NewACME obtains and renews a certificate in the background. The VPN can start
-// right away; handshakes fail until the first certificate arrives.
+// acmeDomain is the background job that obtains one domain's certificate.
+type acmeDomain struct {
+	stop context.CancelFunc
+	err  error // last failure; guarded by acmeCert.mu
+}
+
+// NewACME obtains and renews certificates in the background for the domains passed
+// to SetDomains. The VPN can start right away; handshakes for a domain fail until
+// its first certificate arrives.
 // The storage layout is certmagic's, the same as Hysteria's built-in ACME, so an
 // existing Hysteria ACME directory can be reused without requesting a new certificate.
 func NewACME(o ACMEOptions, log *slog.Logger) (CertSource, error) {
@@ -243,45 +267,104 @@ func NewACME(o ACMEOptions, log *slog.Logger) (CertSource, error) {
 		return nil, fmt.Errorf("unsupported ACME challenge %q", o.Challenge)
 	}
 	cfg.Issuers = []certmagic.Issuer{issuer}
-	cache := certmagic.NewCache(certmagic.CacheOptions{
-		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return cfg, nil },
-		Logger:           zl,
-	})
-	a := &acmeCert{cfg: certmagic.New(cache, *cfg), cache: cache, domain: o.Domain, mode: "acme-" + o.Challenge}
-	go a.manage(log)
+	a := &acmeCert{
+		mode: "acme-" + o.Challenge, log: log, obtain: make(chan struct{}, 1), domains: map[string]*acmeDomain{},
+	}
+	a.cache = certmagic.NewCache(certmagic.CacheOptions{GetConfigForCert: a.configForCert, Logger: zl})
+	a.cfg = certmagic.New(a.cache, *cfg)
 	return a, nil
 }
 
-func (a *acmeCert) manage(log *slog.Logger) {
+// configForCert gives certmagic's maintenance (renewals, OCSP) the config bound to
+// our cache. It rejects any other config, and certificates then never renew.
+func (a *acmeCert) configForCert(certmagic.Certificate) (*certmagic.Config, error) {
+	return a.cfg, nil
+}
+
+// SetDomains starts obtaining certificates for new domains and stops renewing the
+// certificates of removed ones. Their files stay on disk, so adding a domain back
+// is instant.
+func (a *acmeCert) SetDomains(active string, all []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.active = active
+	keep := map[string]bool{}
+	for _, d := range all {
+		keep[d] = true
+		if a.domains[d] == nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			ad := &acmeDomain{stop: cancel}
+			a.domains[d] = ad
+			go a.manage(ctx, d, ad)
+		}
+	}
+	for d, ad := range a.domains {
+		if !keep[d] {
+			ad.stop()
+			delete(a.domains, d)
+			a.cache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: d}})
+		}
+	}
+}
+
+func (a *acmeCert) manage(ctx context.Context, domain string, ad *acmeDomain) {
 	for delay := time.Minute; ; delay = min(delay*2, time.Hour) {
-		err := a.cfg.ManageSync(context.Background(), []string{a.domain})
+		select {
+		case a.obtain <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		err := a.cfg.ManageSync(ctx, []string{domain})
+		<-a.obtain
 		a.mu.Lock()
-		a.err = err
+		if cur := a.domains[domain]; cur != ad {
+			// Removed while we were busy. Don't leave its certificate in maintenance,
+			// unless it has been added back and a new job owns it.
+			if cur == nil {
+				a.cache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: domain}})
+			}
+			a.mu.Unlock()
+			return
+		}
+		ad.err = err
 		a.mu.Unlock()
 		if err == nil {
-			log.Info("certificate ready", "domain", a.domain)
+			a.log.Info("certificate ready", "domain", domain)
 			return // certmagic renews from here on
 		}
-		log.Error("obtaining certificate failed, will retry", "domain", a.domain, "in", delay, "err", err)
-		time.Sleep(delay)
+		a.log.Error("obtaining certificate failed, will retry", "domain", domain, "in", delay, "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
 	}
 }
 
 func (a *acmeCert) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	// Clients may connect by IP or with another SNI; always serve our domain's cert.
+	// Clients may connect by IP or with an unknown SNI; serve the active domain's cert then.
+	name := strings.ToLower(hello.ServerName)
+	a.mu.Lock()
+	if a.domains[name] == nil {
+		name = a.active
+	}
+	a.mu.Unlock()
 	h := *hello
-	h.ServerName = a.domain
+	h.ServerName = name
 	return a.cfg.GetCertificate(&h)
 }
 
-func (a *acmeCert) Status() CertStatus {
+func (a *acmeCert) Status(domain string) CertStatus {
+	var err error
 	a.mu.Lock()
-	err := a.err
+	if ad := a.domains[domain]; ad != nil {
+		err = ad.err
+	}
 	a.mu.Unlock()
 	// Read the cache directly: GetCertificate needs a live handshake (it dereferences
 	// the connection) and may start network activity.
 	var c *tls.Certificate
-	for _, mc := range a.cache.AllMatchingCertificates(a.domain) {
+	for _, mc := range a.cache.AllMatchingCertificates(domain) {
 		if c == nil || mc.Leaf.NotAfter.After(c.Leaf.NotAfter) {
 			c = &mc.Certificate
 		}

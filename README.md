@@ -12,6 +12,7 @@ A [Hysteria 2](https://v2.hysteria.network/) VPN server with a web panel for man
 - **Data quotas**: optional upload+download allowance per user, with a usage bar and a reset button.
 - **Live view**: who is online, how many devices, current speed and total traffic.
 - **Disconnect**: kick a user's devices (they reconnect on their own unless you disable the user).
+- **Domains**: add more domains and switch the one that QR codes use, from the panel. The other domains keep their certificates, so devices set up with an older link still connect while you move users over.
 - **Certificates**: Let's Encrypt (HTTP or TLS challenge), your own certificate files (reloaded when they change) or self-signed with pinning.
 - **Masquerade**: unauthenticated probes see a normal website (any URL you choose) instead of a VPN.
 - **Import**: take over users from an existing Hysteria server config, so phones keep working without rescanning.
@@ -48,7 +49,7 @@ Everything is set with environment variables (see [.env.example](.env.example)):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HYSUI_DOMAIN` | *(required)* | Public hostname clients connect to. Used for the certificate and in client links. |
+| `HYSUI_DOMAIN` | *(required on first start)* | Public hostname clients connect to. It becomes the first domain; after that, manage domains in the panel (see [Domains](#domains)). |
 | `HYSUI_LISTEN` | `:443` | UDP address of the VPN. |
 | `HYSUI_PUBLIC_PORT` | listen port | Port written into client links, if your router maps a different outside port. |
 | `HYSUI_WEB_LISTEN` | `:8080` | Address of the panel (plain HTTP). |
@@ -65,6 +66,19 @@ Everything is set with environment variables (see [.env.example](.env.example)):
 | `HYSUI_SECURE_COOKIES` | `auto` | `auto` marks the session cookie Secure when the panel is reached over HTTPS. |
 | `HYSUI_DATA_DIR` | `/data` | Users, panel login and certificates. |
 | `HYSUI_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
+
+### Domains
+
+**Domains** in the panel header lists every hostname the server answers to. One is **active**: new QR codes and links use it. Adding a domain requests its certificate right away, and the list shows certificate and DNS status for each one.
+
+To move to a new domain:
+
+1. Point the new domain's DNS at the server. With `acme-http` behind a reverse proxy, forward the new domain's port 80 too (see below).
+2. Add it and wait for its certificate.
+3. Make it active and send users their new QR codes.
+4. Remove the old domain once nobody uses it. Devices still set up with it stop connecting after that.
+
+The list is stored in `data/hysui.json`. `HYSUI_DOMAIN` is only read on first start, to create the first entry; changing it later does nothing (the log warns about it).
 
 ### What counts as "home network"
 

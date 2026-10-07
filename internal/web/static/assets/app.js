@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { users: [], status: null, editing: null, search: "" };
+const state = { users: [], status: null, editing: null, search: "", domains: null };
 
 // ---- API ----
 
@@ -338,6 +338,108 @@ async function removeUser(u) {
     toast(`${u.name} deleted`);
   } catch (e) { toast(e.message, true); }
   refresh();
+}
+
+// ---- domains ----
+
+const domainHints = {
+  "acme-http": "Point its DNS at this server first; the certificate is requested right away. Let's Encrypt checks it on port 80, so if a reverse proxy owns port 80, forward this domain to hysui there too.",
+  "acme-tls": "Point its DNS at this server first; the certificate is requested right away. Let's Encrypt checks it on TCP port 443.",
+  "file": "Your certificate files must cover this domain too.",
+  "self-signed": "Point its DNS at this server. Clients pin the certificate, so no new certificate is needed.",
+};
+
+let domainTimer;
+
+function domainMsg(text, bad = false) {
+  $("domain-msg").textContent = text;
+  $("domain-msg").className = bad ? "msg bad" : "msg";
+}
+
+function domainCertPill(c) {
+  if (c.state === "ok") {
+    return h("span", { class: "pill ok" }, h("i", { class: "dot" }),
+      c.notAfter ? `Certificate until ${new Date(c.notAfter).toLocaleDateString()}` : "Certificate OK");
+  }
+  if (c.state === "pending") return h("span", { class: "pill warn" }, "Getting certificate…");
+  return h("span", { class: "pill bad" }, "Certificate error");
+}
+
+function domainRow(d) {
+  const c = d.cert || {};
+  return h("li", {},
+    h("div", { class: "grow" },
+      h("div", { class: "dname" }, d.name, d.active ? h("span", { class: "pill accent" }, "Active") : null),
+      h("div", { class: "meta" },
+        domainCertPill(c),
+        d.dnsError
+          ? h("span", { class: "bad-text" }, `DNS: ${d.dnsError}`)
+          : h("span", {}, `DNS: ${d.addrs.join(", ")}`)),
+      c.state === "error" && c.error ? h("div", { class: "derr", title: c.error }, c.error) : null),
+    d.active ? null : h("div", { class: "actions" },
+      h("button", { class: "btn", onclick: () => activateDomain(d) }, "Make active"),
+      h("button", { class: "btn danger", onclick: () => removeDomain(d) }, "Remove")));
+}
+
+async function loadDomains() {
+  try {
+    state.domains = await api("GET", "/api/domains");
+    $("domain-list").replaceChildren(...state.domains.domains.map(domainRow));
+    $("d-hint").textContent = domainHints[state.domains.mode] || "";
+  } catch (e) {
+    if (e.message !== "signed out") domainMsg(e.message, true);
+  }
+}
+
+$("domains-btn").addEventListener("click", () => {
+  closeMenus();
+  $("d-name").value = "";
+  domainMsg("");
+  $("domains-dialog").showModal();
+  loadDomains();
+  clearInterval(domainTimer);
+  domainTimer = setInterval(() => { if (!document.hidden) loadDomains(); }, 4000); // certificate progress
+});
+
+$("domains-dialog").addEventListener("close", () => clearInterval(domainTimer));
+
+$("domain-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    const d = await api("POST", "/api/domains", { name: $("d-name").value.trim() });
+    $("d-name").value = "";
+    domainMsg(`${d.name} added.`);
+  } catch (e) {
+    domainMsg(e.message, true);
+  }
+  loadDomains();
+});
+
+async function activateDomain(d) {
+  const old = state.domains ? state.domains.active : "the old domain";
+  let text = `New QR codes and links will use ${d.name}. Devices set up with ${old} keep working while it stays in this list.`;
+  if ((d.cert || {}).state !== "ok") text += " Its certificate isn't ready yet, so new links can't connect until it is.";
+  if (d.dnsError) text += ` Its DNS lookup failed (${d.dnsError}).`;
+  if (!(await confirmBox(`Make ${d.name} active?`, text, "Make active"))) return;
+  try {
+    await api("POST", `/api/domains/${encodeURIComponent(d.name)}/activate`);
+    domainMsg(`${d.name} is active. Send new QR codes to users who should switch.`);
+    refreshStatus();
+  } catch (e) {
+    domainMsg(e.message, true);
+  }
+  loadDomains();
+}
+
+async function removeDomain(d) {
+  if (!(await confirmBox(`Remove ${d.name}?`, `Devices whose link still uses ${d.name} may stop connecting. Give them a new QR code first.`, "Remove"))) return;
+  try {
+    await api("DELETE", `/api/domains/${encodeURIComponent(d.name)}`);
+    domainMsg(`${d.name} removed.`);
+  } catch (e) {
+    domainMsg(e.message, true);
+  }
+  loadDomains();
 }
 
 // ---- admin ----

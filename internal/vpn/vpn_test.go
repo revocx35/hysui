@@ -3,6 +3,7 @@ package vpn
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/apernet/hysteria/core/v2/client"
+	"github.com/caddyserver/certmagic"
 
 	"github.com/revocx35/hysui/internal/netpolicy"
 	"github.com/revocx35/hysui/internal/store"
@@ -457,21 +459,29 @@ func TestShareLink(t *testing.T) {
 	}
 }
 
-func TestACMEStatusReportsFailure(t *testing.T) {
+func testACME(t *testing.T) *acmeCert {
+	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	src, err := NewACME(ACMEOptions{
-		Domain: "hysui.invalid", CA: "https://127.0.0.1:1/directory", Challenge: "http",
-		AltPort: 1, Dir: t.TempDir(),
+		CA: "https://127.0.0.1:1/directory", Challenge: "http", AltPort: 1, Dir: t.TempDir(),
 	}, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := src.Status(); s.State != "pending" || s.Mode != "acme-http" {
+	a := src.(*acmeCert)
+	t.Cleanup(func() { a.SetDomains("", nil) }) // stop the retry loops
+	return a
+}
+
+func TestACMEStatusReportsFailure(t *testing.T) {
+	src := testACME(t)
+	src.SetDomains("hysui.invalid", []string{"hysui.invalid"})
+	if s := src.Status("hysui.invalid"); s.State != "pending" || s.Mode != "acme-http" {
 		t.Fatalf("initial status = %+v", s)
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		s := src.Status()
+		s := src.Status("hysui.invalid")
 		if s.State == "error" && s.Error != "" {
 			break
 		}
@@ -482,5 +492,109 @@ func TestACMEStatusReportsFailure(t *testing.T) {
 	}
 	if src.PinSHA256() != "" {
 		t.Fatal("ACME certificates must not be pinned")
+	}
+}
+
+// servedName does a TLS handshake with the given SNI and returns the name on the
+// certificate the server picked.
+func servedName(t *testing.T, src CertSource, sni string) string {
+	t.Helper()
+	c, s := net.Pipe()
+	defer c.Close()
+	defer s.Close()
+	go func() { _ = tls.Server(s, &tls.Config{GetCertificate: src.GetCertificate}).Handshake() }()
+	cl := tls.Client(c, &tls.Config{ServerName: sni, InsecureSkipVerify: true})
+	if err := cl.Handshake(); err != nil {
+		t.Fatalf("handshake for %q: %v", sni, err)
+	}
+	return cl.ConnectionState().PeerCertificates[0].Subject.CommonName
+}
+
+func TestACMEDomains(t *testing.T) {
+	src := testACME(t)
+	dir := t.TempDir()
+	for _, name := range []string{"a.test", "b.test"} {
+		certPath, keyPath := filepath.Join(dir, name+".crt"), filepath.Join(dir, name+".key")
+		if err := writeSelfSigned(certPath, keyPath, name); err != nil {
+			t.Fatal(err)
+		}
+		c, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.cfg.CacheUnmanagedTLSCertificate(context.Background(), c, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src.SetDomains("a.test", []string{"a.test", "b.test"})
+	for sni, want := range map[string]string{"a.test": "a.test", "B.test": "b.test", "other.test": "a.test", "": "a.test"} {
+		if got := servedName(t, src, sni); got != want {
+			t.Errorf("SNI %q got the certificate for %s, want %s", sni, got, want)
+		}
+	}
+	if s := src.Status("b.test"); s.State != "ok" || s.NotAfter.IsZero() {
+		t.Fatalf("status of b.test = %+v", s)
+	}
+
+	// Switch the active domain, then drop a.test.
+	src.SetDomains("b.test", []string{"a.test", "b.test"})
+	if got := servedName(t, src, "other.test"); got != "b.test" {
+		t.Fatalf("unknown SNI after switching got %s", got)
+	}
+	src.SetDomains("b.test", []string{"b.test"})
+	if got := servedName(t, src, "a.test"); got != "b.test" {
+		t.Fatalf("removed domain still served its own certificate: %s", got)
+	}
+	src.mu.Lock()
+	_, stillManaged := src.domains["a.test"]
+	src.mu.Unlock()
+	if stillManaged {
+		t.Fatal("removed domain is still managed")
+	}
+}
+
+// Renewal looks up each certificate's config through configForCert, and certmagic
+// refuses to renew with a config that isn't bound to the cache.
+func TestACMEMaintenanceConfig(t *testing.T) {
+	src := testACME(t)
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "c.crt"), filepath.Join(dir, "c.key")
+	if err := writeSelfSigned(certPath, keyPath, "renew.test"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := src.configForCert(certmagic.Certificate{})
+	if err != nil || cfg == nil {
+		t.Fatalf("configForCert: %v %v", cfg, err)
+	}
+	// Caching through the returned config only lands in our cache if it is bound to it
+	// (an unbound config has no cache at all).
+	if _, err := cfg.CacheUnmanagedTLSCertificate(context.Background(), c, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(src.cache.AllMatchingCertificates("renew.test")) != 1 {
+		t.Fatal("maintenance config is not bound to the certificate cache; renewals would fail")
+	}
+}
+
+func TestFileCertCoverage(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "c.crt"), filepath.Join(dir, "c.key")
+	if err := writeSelfSigned(certPath, keyPath, "vpn.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	src, err := NewFileCert(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := src.Status("vpn.example.com"); s.State != "ok" {
+		t.Fatalf("covered domain: %+v", s)
+	}
+	if s := src.Status("other.example.com"); s.State != "error" || !strings.Contains(s.Error, "does not cover") {
+		t.Fatalf("uncovered domain: %+v", s)
 	}
 }

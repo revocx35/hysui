@@ -52,7 +52,7 @@ func TestErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"HYSUI_DOMAIN", "HYSUI_LISTEN", "HYSUI_TLS_CERT", "HYSUI_HOME_EXTRA", "HYSUI_ADMIN_PASSWORD"} {
+	for _, want := range []string{"HYSUI_LISTEN", "HYSUI_TLS_CERT", "HYSUI_HOME_EXTRA", "HYSUI_ADMIN_PASSWORD"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing error about %s in: %v", want, err)
 		}

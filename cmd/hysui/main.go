@@ -99,6 +99,10 @@ func serve() error {
 	if err := bootstrapAdmin(st, cfg); err != nil {
 		return err
 	}
+	domains, err := initDomains(st, cfg.Domain, log)
+	if err != nil {
+		return err
+	}
 
 	policy := netpolicy.NewDefault(cfg.HomeExtra)
 	if cfg.DetectLocal {
@@ -117,10 +121,11 @@ func serve() error {
 		}()
 	}
 
-	certs, err := newCertSource(cfg, log)
+	certs, err := newCertSource(cfg, domains.Active, log)
 	if err != nil {
 		return err
 	}
+	certs.SetDomains(domains.Active, domains.List)
 	masq, err := vpn.Masquerade(cfg.Masquerade)
 	if err != nil {
 		return err
@@ -133,8 +138,8 @@ func serve() error {
 
 	panel := web.New(web.Options{
 		Version: version, Store: st, Manager: mgr, Certs: certs, Policy: policy,
-		Link:   vpn.LinkOptions{Host: cfg.Domain, Port: cfg.PublicPort},
-		Listen: cfg.Listen, TrustedProxies: cfg.TrustedProxies, SecureCookies: cfg.SecureCookies, Log: log,
+		PublicPort: cfg.PublicPort, Listen: cfg.Listen,
+		TrustedProxies: cfg.TrustedProxies, SecureCookies: cfg.SecureCookies, Log: log,
 	})
 	httpSrv := &http.Server{Addr: cfg.WebListen, Handler: panel, ReadHeaderTimeout: 10 * time.Second}
 
@@ -146,7 +151,7 @@ func serve() error {
 	go func() { errc <- fmt.Errorf("vpn: %w", hy.Serve()) }()
 	go func() { errc <- fmt.Errorf("panel: %w", httpSrv.ListenAndServe()) }()
 	log.Info("hysui started", "version", version, "vpn", cfg.Listen+"/udp", "panel", cfg.WebListen,
-		"domain", cfg.Domain, "tls", cfg.TLSMode, "users", len(st.Users()))
+		"domain", domains.Active, "tls", cfg.TLSMode, "users", len(st.Users()))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -166,19 +171,40 @@ func serve() error {
 	return err
 }
 
-func newCertSource(cfg *config.Config, log *slog.Logger) (vpn.CertSource, error) {
+// newCertSource creates the certificate source; domain names a self-signed certificate.
+func newCertSource(cfg *config.Config, domain string, log *slog.Logger) (vpn.CertSource, error) {
 	switch cfg.TLSMode {
 	case config.TLSFile:
 		return vpn.NewFileCert(cfg.TLSCert, cfg.TLSKey)
 	case config.TLSSelfSigned:
-		return vpn.NewSelfSigned(filepath.Join(cfg.DataDir, "tls"), cfg.Domain)
+		return vpn.NewSelfSigned(filepath.Join(cfg.DataDir, "tls"), domain)
 	default:
 		challenge := strings.TrimPrefix(cfg.TLSMode, "acme-")
 		return vpn.NewACME(vpn.ACMEOptions{
-			Domain: cfg.Domain, Email: cfg.ACMEEmail, CA: cfg.ACMECA, Challenge: challenge,
+			Email: cfg.ACMEEmail, CA: cfg.ACMECA, Challenge: challenge,
 			AltPort: cfg.ACMEAltPort, Dir: filepath.Join(cfg.DataDir, "acme"),
 		}, log)
 	}
+}
+
+// initDomains adds HYSUI_DOMAIN as the first domain on first start. After that the
+// panel manages domains and HYSUI_DOMAIN is ignored.
+func initDomains(st *store.Store, env string, log *slog.Logger) (store.Domains, error) {
+	d := st.Domains()
+	if d.Active != "" {
+		if n, _ := store.NormalizeDomain(env); env != "" && n != d.Active {
+			log.Warn("HYSUI_DOMAIN only sets the first domain; change domains in the panel (Domains)",
+				"HYSUI_DOMAIN", env, "active", d.Active)
+		}
+		return d, nil
+	}
+	if env == "" {
+		return d, errors.New("HYSUI_DOMAIN is required on first start (the public hostname clients connect to)")
+	}
+	if _, err := st.AddDomain(env); err != nil {
+		return d, fmt.Errorf("HYSUI_DOMAIN: %w", err)
+	}
+	return st.Domains(), nil
 }
 
 // bootstrapAdmin creates the panel login on first start.

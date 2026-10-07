@@ -1,9 +1,11 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,11 +58,19 @@ func newPanel(t *testing.T) *panel {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.AddDomain("vpn.example.com"); err != nil {
+		t.Fatal(err)
+	}
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	srv := New(Options{
 		Version: "test", Store: st, Manager: mgr, Certs: certs, Policy: policy,
-		Link: vpn.LinkOptions{Host: "vpn.example.com", Port: 443}, Listen: ":443",
-		SecureCookies: "auto", Log: log, Now: clk.now,
+		PublicPort: 443, Listen: ":443", SecureCookies: "auto", Log: log, Now: clk.now,
+		LookupHost: func(_ context.Context, host string) ([]string, error) {
+			if host == "vpn.example.com." {
+				return []string{"203.0.113.7"}, nil
+			}
+			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+		},
 	})
 	return &panel{t: t, srv: srv, st: st, mgr: mgr, clk: clk}
 }
@@ -288,5 +298,76 @@ func TestChangeAdminPassword(t *testing.T) {
 	}
 	if r := p.do("POST", "/api/login", `{"username":"boss","password":"another long password"}`, nil); r.code != http.StatusOK {
 		t.Fatalf("login with new credentials: %d", r.code)
+	}
+}
+
+func TestDomains(t *testing.T) {
+	p := newPanel(t)
+	p.login(adminPass)
+	if r := p.do("POST", "/api/users", `{"name":"iphone"}`, nil); r.code != http.StatusCreated {
+		t.Fatalf("create user: %d", r.code)
+	}
+
+	type listing struct {
+		Active  string
+		Mode    string
+		Domains []domainView
+	}
+	list := func() listing {
+		t.Helper()
+		r := p.do("GET", "/api/domains", "", nil)
+		if r.code != http.StatusOK {
+			t.Fatalf("list: %d %s", r.code, r.body)
+		}
+		var l listing
+		_ = json.Unmarshal([]byte(r.body), &l)
+		return l
+	}
+	l := list()
+	if l.Active != "vpn.example.com" || l.Mode != "self-signed" || len(l.Domains) != 1 ||
+		!l.Domains[0].Active || l.Domains[0].Cert.State != "ok" || len(l.Domains[0].Addrs) != 1 {
+		t.Fatalf("initial list: %+v", l)
+	}
+
+	r := p.do("POST", "/api/domains", `{"name":"Backup.Example.NET"}`, nil)
+	if r.code != http.StatusCreated || !strings.Contains(r.body, `"backup.example.net"`) {
+		t.Fatalf("add: %d %s", r.code, r.body)
+	}
+	if r := p.do("POST", "/api/domains", `{"name":"backup.example.net"}`, nil); r.code != http.StatusConflict {
+		t.Fatalf("duplicate: %d", r.code)
+	}
+	if r := p.do("POST", "/api/domains", `{"name":"https://x.example.com/"}`, nil); r.code != http.StatusBadRequest {
+		t.Fatalf("invalid: %d", r.code)
+	}
+	l = list()
+	if len(l.Domains) != 2 || l.Domains[1].Active || l.Domains[1].DNSError != "no DNS record" {
+		t.Fatalf("after add: %+v", l)
+	}
+
+	if r := p.do("POST", "/api/domains/ghost.example.com/activate", "", nil); r.code != http.StatusNotFound {
+		t.Fatalf("activate unknown: %d", r.code)
+	}
+	if r := p.do("POST", "/api/domains/backup.example.net/activate", "", nil); r.code != http.StatusNoContent {
+		t.Fatalf("activate: %d %s", r.code, r.body)
+	}
+	r = p.do("GET", "/api/users/iphone/link", "", nil)
+	if !strings.Contains(r.body, "@backup.example.net:443/") || !strings.Contains(r.body, "sni=backup.example.net") {
+		t.Fatalf("link does not use the new domain: %s", r.body)
+	}
+	if r := p.do("GET", "/api/status", "", nil); !strings.Contains(r.body, `"domain":"backup.example.net"`) {
+		t.Fatalf("status: %s", r.body)
+	}
+
+	if r := p.do("DELETE", "/api/domains/backup.example.net", "", nil); r.code != http.StatusConflict {
+		t.Fatalf("delete active: %d", r.code)
+	}
+	if r := p.do("DELETE", "/api/domains/vpn.example.com", "", nil); r.code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", r.code, r.body)
+	}
+	if r := p.do("DELETE", "/api/domains/vpn.example.com", "", nil); r.code != http.StatusNotFound {
+		t.Fatalf("second delete: %d", r.code)
+	}
+	if l := list(); len(l.Domains) != 1 || l.Active != "backup.example.net" {
+		t.Fatalf("after delete: %+v", l)
 	}
 }

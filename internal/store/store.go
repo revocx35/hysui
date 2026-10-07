@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,12 +16,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 var (
 	ErrNotFound = errors.New("user not found")
 	ErrExists   = errors.New("user already exists")
+
+	ErrDomainNotFound = errors.New("domain not found")
+	ErrDomainExists   = errors.New("domain already added")
+	ErrDomainActive   = errors.New("the active domain cannot be removed; make another domain active first")
 )
+
+// MaxDomains limits the domain list (each one is a certificate to obtain and renew).
+const MaxDomains = 20
 
 var (
 	nameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
@@ -71,10 +81,40 @@ type Admin struct {
 	PasswordHash string `json:"passwordHash"`
 }
 
+// Domains are the hostnames clients connect to. Active is the one written into share
+// links. The others keep their certificates, so devices set up with them still work.
+type Domains struct {
+	Active string   `json:"active"`
+	List   []string `json:"list"` // includes Active
+}
+
+var labelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// NormalizeDomain lower-cases a hostname, converts an international name to its
+// xn-- form and checks it. IP addresses are accepted as they are.
+func NormalizeDomain(s string) (string, error) {
+	s = strings.TrimSuffix(strings.TrimSpace(s), ".")
+	if a, err := netip.ParseAddr(s); err == nil && a.Zone() == "" {
+		return a.String(), nil
+	}
+	const msg = "enter a hostname such as vpn.example.com"
+	ascii, err := idna.Lookup.ToASCII(s)
+	if err != nil || ascii == "" || len(ascii) > 253 {
+		return "", errors.New(msg)
+	}
+	for _, l := range strings.Split(ascii, ".") {
+		if !labelRe.MatchString(l) {
+			return "", errors.New(msg)
+		}
+	}
+	return ascii, nil
+}
+
 type data struct {
-	Version int    `json:"version"`
-	Admin   Admin  `json:"admin"`
-	Users   []User `json:"users"`
+	Version int     `json:"version"`
+	Admin   Admin   `json:"admin"`
+	Domains Domains `json:"domains,omitzero"`
+	Users   []User  `json:"users"`
 }
 
 // Store is a concurrency-safe, file-backed user database.
@@ -146,6 +186,77 @@ func (s *Store) SetAdmin(a Admin) error {
 	s.d.Admin = a
 	if err := s.saveLocked(); err != nil {
 		s.d.Admin = old
+		return err
+	}
+	return nil
+}
+
+// Domains returns the domain list.
+func (s *Store) Domains() Domains {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return Domains{Active: s.d.Domains.Active, List: slices.Clone(s.d.Domains.List)}
+}
+
+// AddDomain adds a domain and returns its normalized name. The first domain added
+// becomes the active one.
+func (s *Store) AddDomain(name string) (string, error) {
+	name, err := NormalizeDomain(name)
+	if err != nil {
+		return "", err
+	}
+	return name, s.updateDomains(func(d *Domains) error {
+		if slices.Contains(d.List, name) {
+			return ErrDomainExists
+		}
+		if len(d.List) >= MaxDomains {
+			return fmt.Errorf("at most %d domains", MaxDomains)
+		}
+		d.List = append(d.List, name)
+		if d.Active == "" {
+			d.Active = name
+		}
+		return nil
+	})
+}
+
+// SetActiveDomain makes name the domain written into share links.
+func (s *Store) SetActiveDomain(name string) error {
+	return s.updateDomains(func(d *Domains) error {
+		if !slices.Contains(d.List, name) {
+			return ErrDomainNotFound
+		}
+		d.Active = name
+		return nil
+	})
+}
+
+// DeleteDomain removes a domain other than the active one.
+func (s *Store) DeleteDomain(name string) error {
+	return s.updateDomains(func(d *Domains) error {
+		i := slices.Index(d.List, name)
+		switch {
+		case i < 0:
+			return ErrDomainNotFound
+		case name == d.Active:
+			return ErrDomainActive
+		}
+		d.List = slices.Delete(d.List, i, i+1)
+		return nil
+	})
+}
+
+func (s *Store) updateDomains(fn func(d *Domains) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.d.Domains
+	d := Domains{Active: old.Active, List: slices.Clone(old.List)}
+	if err := fn(&d); err != nil {
+		return err
+	}
+	s.d.Domains = d
+	if err := s.saveLocked(); err != nil {
+		s.d.Domains = old
 		return err
 	}
 	return nil
