@@ -371,3 +371,24 @@ func TestDomains(t *testing.T) {
 		t.Fatalf("after delete: %+v", l)
 	}
 }
+
+func TestObfuscatedLink(t *testing.T) {
+	p := newPanel(t)
+	p.login(adminPass)
+	p.do("POST", "/api/users", `{"name":"iphone"}`, nil)
+	if r := p.do("GET", "/api/users/iphone/link?obfs=1", "", nil); r.code != http.StatusBadRequest {
+		t.Fatalf("obfuscated link while off: %d", r.code)
+	}
+	p.srv.o.ObfsPort, p.srv.o.ObfsPassword = 8443, "obfspassword"
+	r := p.do("GET", "/api/users/iphone/link?obfs=1", "", nil)
+	if r.code != http.StatusOK || !strings.Contains(r.body, "@vpn.example.com:8443/") ||
+		!strings.Contains(r.body, "obfs=salamander") || !strings.Contains(r.body, "obfs-password=obfspassword") {
+		t.Fatalf("obfuscated link: %d %s", r.code, r.body)
+	}
+	if r := p.do("GET", "/api/users/iphone/link", "", nil); strings.Contains(r.body, "obfs") || !strings.Contains(r.body, ":443/") {
+		t.Fatalf("standard link changed: %s", r.body)
+	}
+	if r := p.do("GET", "/api/status", "", nil); !strings.Contains(r.body, `"obfsPort":8443`) {
+		t.Fatalf("status: %s", r.body)
+	}
+}

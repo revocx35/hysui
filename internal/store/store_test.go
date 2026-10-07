@@ -157,3 +157,23 @@ func TestDomains(t *testing.T) {
 		t.Fatal("domain limit not enforced")
 	}
 }
+
+func TestObfsPassword(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysui.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	gen := func() string { calls++; return "generated-password" }
+	if p, err := s.ObfsPassword(gen); err != nil || p != "generated-password" {
+		t.Fatalf("first: %q %v", p, err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s2.ObfsPassword(gen); p != "generated-password" || calls != 1 {
+		t.Fatalf("not persisted: %q, generated %d times", p, calls)
+	}
+}

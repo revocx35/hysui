@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/apernet/hysteria/core/v2/server"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/revocx35/hysui/internal/config"
@@ -131,14 +132,26 @@ func serve() error {
 		return err
 	}
 	mgr := vpn.NewManager(st, policy, log)
-	hy, err := vpn.NewServer(cfg.Listen, mgr, certs, masq)
+	hy, err := vpn.NewServer(cfg.Listen, "", mgr, certs, masq)
 	if err != nil {
 		return err
+	}
+	var hyObfs server.Server
+	obfsPassword := cfg.ObfsPassword
+	if cfg.ObfsListen != "" {
+		if obfsPassword == "" {
+			if obfsPassword, err = st.ObfsPassword(func() string { return web.RandomPassword(24) }); err != nil {
+				return err
+			}
+		}
+		if hyObfs, err = vpn.NewServer(cfg.ObfsListen, obfsPassword, mgr, certs, masq); err != nil {
+			return err
+		}
 	}
 
 	panel := web.New(web.Options{
 		Version: version, Store: st, Manager: mgr, Certs: certs, Policy: policy,
-		PublicPort: cfg.PublicPort, Listen: cfg.Listen,
+		PublicPort: cfg.PublicPort, Listen: cfg.Listen, ObfsPort: cfg.ObfsPublicPort, ObfsPassword: obfsPassword,
 		TrustedProxies: cfg.TrustedProxies, SecureCookies: cfg.SecureCookies, Log: log,
 	})
 	httpSrv := &http.Server{Addr: cfg.WebListen, Handler: panel, ReadHeaderTimeout: 10 * time.Second}
@@ -147,11 +160,14 @@ func serve() error {
 	flushed := make(chan struct{})
 	go func() { mgr.Run(stop); close(flushed) }()
 
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
 	go func() { errc <- fmt.Errorf("vpn: %w", hy.Serve()) }()
+	if hyObfs != nil {
+		go func() { errc <- fmt.Errorf("obfuscated vpn: %w", hyObfs.Serve()) }()
+	}
 	go func() { errc <- fmt.Errorf("panel: %w", httpSrv.ListenAndServe()) }()
 	log.Info("hysui started", "version", version, "vpn", cfg.Listen+"/udp", "panel", cfg.WebListen,
-		"domain", domains.Active, "tls", cfg.TLSMode, "users", len(st.Users()))
+		"domain", domains.Active, "tls", cfg.TLSMode, "users", len(st.Users()), "obfuscated", cfg.ObfsListen)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -168,6 +184,9 @@ func serve() error {
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
 	_ = hy.Close()
+	if hyObfs != nil {
+		_ = hyObfs.Close()
+	}
 	return err
 }
 

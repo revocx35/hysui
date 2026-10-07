@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/apernet/hysteria/core/v2/client"
+	"github.com/apernet/hysteria/extras/v2/obfs"
 	"github.com/caddyserver/certmagic"
 
 	"github.com/revocx35/hysui/internal/netpolicy"
@@ -446,6 +447,60 @@ func TestGoid(t *testing.T) {
 	}
 }
 
+type obfsConnFactory struct{ password string }
+
+func (f obfsConnFactory) New(net.Addr) (net.PacketConn, error) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	return obfs.WrapPacketConnSalamander(pc, []byte(f.password))
+}
+
+func TestObfuscatedListener(t *testing.T) {
+	e := newEnv(t, store.User{Name: "phone", Enabled: true})
+	free, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := free.LocalAddr().(*net.UDPAddr)
+	free.Close()
+	certs, err := NewSelfSigned(t.TempDir(), "hysui.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	masq, _ := Masquerade("")
+	srv, err := NewServer(addr.String(), "obfs-password", e.mgr, certs, masq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	dial := func(cf client.ConnFactory) (client.Client, error) {
+		c, _, err := client.NewClient(&client.Config{
+			ConnFactory: cf, ServerAddr: addr, Auth: "phone:" + pass,
+			TLSConfig: client.TLSConfig{ServerName: "hysui.test", InsecureSkipVerify: true},
+		})
+		return c, err
+	}
+	c, err := dial(obfsConnFactory{"obfs-password"})
+	if err != nil {
+		t.Fatalf("obfuscated client: %v", err)
+	}
+	defer c.Close()
+	if body, err := get(c, "http://"+e.inet+"/"); err != nil || !strings.Contains(body, "hello") {
+		t.Fatalf("traffic through the obfuscated listener: %q %v", body, err)
+	}
+	// Plain QUIC must get no answer there, or the port would still look like QUIC.
+	for _, cf := range []client.ConnFactory{nil, obfsConnFactory{"wrong-password"}} {
+		if c, err := dial(cf); err == nil {
+			c.Close()
+			t.Fatalf("client %T connected without the right obfuscation", cf)
+		}
+	}
+}
+
 func TestShareLink(t *testing.T) {
 	u := store.User{Name: "iphone", Password: "abc-DEF_123.xyz"}
 	got := ShareLink(LinkOptions{Host: "vpn.example.com", Port: 443}, u)
@@ -456,6 +511,11 @@ func TestShareLink(t *testing.T) {
 	got = ShareLink(LinkOptions{Host: "h", Port: 8443, Pin: "ab12"}, u)
 	if !strings.Contains(got, "insecure=1") || !strings.Contains(got, "pinSHA256=ab12") {
 		t.Fatalf("self-signed link missing pin: %s", got)
+	}
+	got = ShareLink(LinkOptions{Host: "vpn.example.com", Port: 8443, Obfs: "s3cret pw"}, u)
+	want = "hysteria2://iphone:abc-DEF_123.xyz@vpn.example.com:8443/?obfs=salamander&obfs-password=s3cret+pw&sni=vpn.example.com#iphone%20(obfuscated)"
+	if got != want {
+		t.Fatalf("obfuscated link:\ngot  %s\nwant %s", got, want)
 	}
 }
 

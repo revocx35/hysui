@@ -26,6 +26,11 @@ type Config struct {
 	Listen     string // UDP address of the VPN
 	PublicPort int    // UDP port in share links (if the router maps a different port)
 
+	// Optional second listener with Salamander obfuscation, for networks that block QUIC.
+	ObfsListen     string
+	ObfsPublicPort int
+	ObfsPassword   string // empty = generated once and kept in the data directory
+
 	TLSMode     string
 	ACMEEmail   string
 	ACMECA      string
@@ -63,6 +68,8 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		TLSCert:       env("TLS_CERT", ""),
 		TLSKey:        env("TLS_KEY", ""),
 		Masquerade:    env("MASQUERADE_URL", ""),
+		ObfsListen:    env("OBFS_LISTEN", ""),
+		ObfsPassword:  env("OBFS_PASSWORD", ""),
 		WebListen:     env("WEB_LISTEN", ":8080"),
 		SecureCookies: strings.ToLower(env("SECURE_COOKIES", "auto")),
 		DataDir:       env("DATA_DIR", "/data"),
@@ -78,6 +85,22 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 	c.PublicPort, err = strconv.Atoi(env("PUBLIC_PORT", lp))
 	if err != nil || c.PublicPort < 1 || c.PublicPort > 65535 {
 		errs = append(errs, errors.New("HYSUI_PUBLIC_PORT must be a port number"))
+	}
+	if c.ObfsListen != "" {
+		_, op, err := net.SplitHostPort(c.ObfsListen)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("HYSUI_OBFS_LISTEN: %w", err))
+		}
+		c.ObfsPublicPort, err = strconv.Atoi(env("OBFS_PUBLIC_PORT", op))
+		if err != nil || c.ObfsPublicPort < 1 || c.ObfsPublicPort > 65535 {
+			errs = append(errs, errors.New("HYSUI_OBFS_PUBLIC_PORT must be a port number"))
+		}
+		if c.ObfsListen == c.Listen {
+			errs = append(errs, errors.New("HYSUI_OBFS_LISTEN must differ from HYSUI_LISTEN"))
+		}
+	}
+	if c.ObfsPassword != "" && len(c.ObfsPassword) < 8 {
+		errs = append(errs, errors.New("HYSUI_OBFS_PASSWORD must be at least 8 characters"))
 	}
 	switch c.TLSMode {
 	case TLSACMEHTTP, TLSACMETLS, TLSSelfSigned:

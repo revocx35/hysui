@@ -29,11 +29,12 @@ func TestOverrides(t *testing.T) {
 		"HYSUI_HOME_EXTRA":      "203.0.113.0/24, 198.51.100.7",
 		"HYSUI_TRUSTED_PROXIES": "192.168.1.20",
 		"HYSUI_DETECT_LOCAL":    "false",
+		"HYSUI_OBFS_LISTEN":     ":8444",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.PublicPort != 443 || len(c.HomeExtra) != 2 || c.DetectLocal || len(c.TrustedProxies) != 1 {
+	if c.PublicPort != 443 || len(c.HomeExtra) != 2 || c.DetectLocal || len(c.TrustedProxies) != 1 || c.ObfsPublicPort != 8444 {
 		t.Fatalf("unexpected: %+v", c)
 	}
 	c, err = FromEnv(envMap(map[string]string{"HYSUI_DOMAIN": "x", "HYSUI_TRUSTED_PROXIES": "private"}))
@@ -48,11 +49,13 @@ func TestErrors(t *testing.T) {
 		"HYSUI_LISTEN":         "nope",
 		"HYSUI_HOME_EXTRA":     "bogus",
 		"HYSUI_ADMIN_PASSWORD": "short",
+		"HYSUI_OBFS_LISTEN":    "8443",
+		"HYSUI_OBFS_PASSWORD":  "abc",
 	}))
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"HYSUI_LISTEN", "HYSUI_TLS_CERT", "HYSUI_HOME_EXTRA", "HYSUI_ADMIN_PASSWORD"} {
+	for _, want := range []string{"HYSUI_OBFS_LISTEN", "HYSUI_OBFS_PASSWORD", "HYSUI_LISTEN", "HYSUI_TLS_CERT", "HYSUI_HOME_EXTRA", "HYSUI_ADMIN_PASSWORD"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing error about %s in: %v", want, err)
 		}

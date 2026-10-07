@@ -108,6 +108,11 @@
   <dialog id="qr-dialog">
     <div class="body">
       <h2 id="qr-title">Connect</h2>
+      <div class="seg" id="qr-mode" role="group" aria-label="Connection type" hidden>
+        <button type="button" id="qr-standard" aria-pressed="true">Standard</button>
+        <button type="button" id="qr-obfs" aria-pressed="false">Obfuscated</button>
+      </div>
+      <p class="muted" id="qr-mode-hint" hidden></p>
       <div class="qr">
         <img id="qr-img" alt="QR code for the client link">
         <code id="qr-uri"></code>

@@ -181,6 +181,10 @@ dialog form.domain-add { padding: 0; }
 @media (max-width: 560px) {
   .domains li { flex-direction: column; align-items: stretch; }
 }
+.seg { display: flex; border: 1px solid var(--border); border-radius: 8px; padding: 3px; gap: 3px; margin-bottom: 8px; }
+.seg button { flex: 1; border: 0; background: none; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; color: var(--muted); }
+.seg button[aria-pressed=true] { background: var(--accent-soft); color: var(--accent); }
+#qr-mode-hint { font-size: 12px; margin: 0 0 12px; }
 .qr { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .qr img { width: 260px; height: 260px; background: #fff; padding: 8px; border-radius: 8px; image-rendering: pixelated; }
 .qr code { word-break: break-all; font-size: 12px; background: var(--bg); padding: 8px; border-radius: 8px; width: 100%; }

@@ -114,6 +114,7 @@ type data struct {
 	Version int     `json:"version"`
 	Admin   Admin   `json:"admin"`
 	Domains Domains `json:"domains,omitzero"`
+	Obfs    string  `json:"obfsPassword,omitempty"`
 	Users   []User  `json:"users"`
 }
 
@@ -189,6 +190,22 @@ func (s *Store) SetAdmin(a Admin) error {
 		return err
 	}
 	return nil
+}
+
+// ObfsPassword returns the Salamander obfuscation password, generating and saving
+// one with gen on first use.
+func (s *Store) ObfsPassword(gen func() string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.d.Obfs != "" {
+		return s.d.Obfs, nil
+	}
+	s.d.Obfs = gen()
+	if err := s.saveLocked(); err != nil {
+		s.d.Obfs = ""
+		return "", err
+	}
+	return s.d.Obfs, nil
 }
 
 // Domains returns the domain list.

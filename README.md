@@ -14,6 +14,7 @@ A [Hysteria 2](https://v2.hysteria.network/) VPN server with a web panel for man
 - **Disconnect**: kick a user's devices (they reconnect on their own unless you disable the user).
 - **Domains**: add more domains and switch the one that QR codes use, from the panel. The other domains keep their certificates, so devices set up with an older link still connect while you move users over.
 - **Certificates**: Let's Encrypt (HTTP or TLS challenge), your own certificate files (reloaded when they change) or self-signed with pinning.
+- **Obfuscated port**: an optional second VPN port with Hysteria's Salamander obfuscation, for networks that block QUIC. The QR dialog gives both links.
 - **Masquerade**: unauthenticated probes see a normal website (any URL you choose) instead of a VPN.
 - **Import**: take over users from an existing Hysteria server config, so phones keep working without rescanning.
 
@@ -52,6 +53,9 @@ Everything is set with environment variables (see [.env.example](.env.example)):
 | `HYSUI_DOMAIN` | *(required on first start)* | Public hostname clients connect to. It becomes the first domain; after that, manage domains in the panel (see [Domains](#domains)). |
 | `HYSUI_LISTEN` | `:443` | UDP address of the VPN. |
 | `HYSUI_PUBLIC_PORT` | listen port | Port written into client links, if your router maps a different outside port. |
+| `HYSUI_OBFS_LISTEN` | | UDP address of an extra, obfuscated VPN port (e.g. `:8443`), for networks that block QUIC. Off when empty. |
+| `HYSUI_OBFS_PUBLIC_PORT` | obfs listen port | Port written into obfuscated client links. |
+| `HYSUI_OBFS_PASSWORD` | random | Obfuscation password shared by all users. Generated on first start and kept in `data/hysui.json` if empty. |
 | `HYSUI_WEB_LISTEN` | `:8080` | Address of the panel (plain HTTP). |
 | `HYSUI_ADMIN_USER` / `HYSUI_ADMIN_PASSWORD` | `admin` / random | Panel login created on first start. A random password is printed to the log. |
 | `HYSUI_TLS_MODE` | `acme-http` | `acme-http`, `acme-tls`, `file` or `self-signed`. |
@@ -79,6 +83,12 @@ To move to a new domain:
 4. Remove the old domain once nobody uses it. Devices still set up with it stop connecting after that.
 
 The list is stored in `data/hysui.json`. `HYSUI_DOMAIN` is only read on first start, to create the first entry; changing it later does nothing (the log warns about it).
+
+### Networks that block QUIC
+
+Hysteria runs over QUIC, which some networks recognize and drop. Set `HYSUI_OBFS_LISTEN=:8443` (and forward that UDP port on your router) to add a second VPN port with Salamander obfuscation: every packet is scrambled, so the traffic no longer looks like QUIC. The normal port keeps working as before. In the panel, the QR dialog then has a **Standard / Obfuscated** switch.
+
+This does not help on networks that block UDP entirely.
 
 ### What counts as "home network"
 

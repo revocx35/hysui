@@ -39,7 +39,9 @@ type Options struct {
 	Manager        *vpn.Manager
 	Certs          vpn.CertSource
 	Policy         *netpolicy.Policy
-	PublicPort     int    // UDP port in share links
+	PublicPort     int // UDP port in share links
+	ObfsPort       int // UDP port of the obfuscated listener in share links; 0 = none
+	ObfsPassword   string
 	Listen         string // VPN UDP listen address, for display
 	TrustedProxies []netip.Prefix
 	SecureCookies  string // auto, true, false
@@ -307,6 +309,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"version":    s.o.Version,
 		"domain":     domain,
 		"port":       s.o.PublicPort,
+		"obfsPort":   s.o.ObfsPort,
 		"listen":     s.o.Listen,
 		"cert":       s.o.Certs.Status(domain),
 		"uptimeSec":  int(s.o.Now().Sub(s.started).Seconds()),
@@ -465,6 +468,13 @@ func (s *Server) userLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	link := vpn.LinkOptions{Host: s.o.Store.Domains().Active, Port: s.o.PublicPort, Pin: s.o.Certs.PinSHA256()}
+	if r.URL.Query().Get("obfs") == "1" {
+		if s.o.ObfsPort == 0 {
+			writeErr(w, http.StatusBadRequest, "the obfuscated listener is off (set HYSUI_OBFS_LISTEN)")
+			return
+		}
+		link.Port, link.Obfs = s.o.ObfsPort, s.o.ObfsPassword
+	}
 	uri := vpn.ShareLink(link, u)
 	png, err := qrcode.Encode(uri, qrcode.Medium, 320)
 	if err != nil {

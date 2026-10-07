@@ -286,17 +286,28 @@ $("user-form").addEventListener("submit", async (ev) => {
 
 $("f-generate").addEventListener("click", () => ($("f-password").value = genPassword()));
 
-async function showQR(u) {
+async function showQR(u, obfs = false) {
+  const s = state.status || {};
   try {
-    const link = await api("GET", `/api/users/${encodeURIComponent(u.name)}/link`);
+    const link = await api("GET", `/api/users/${encodeURIComponent(u.name)}/link${obfs ? "?obfs=1" : ""}`);
+    state.qrUser = u;
     $("qr-title").textContent = `Connect ${u.name}`;
     $("qr-img").src = link.qr;
     $("qr-uri").textContent = link.uri;
-    $("qr-dialog").showModal();
+    $("qr-mode").hidden = $("qr-mode-hint").hidden = !s.obfsPort;
+    $("qr-standard").setAttribute("aria-pressed", String(!obfs));
+    $("qr-obfs").setAttribute("aria-pressed", String(obfs));
+    $("qr-mode-hint").textContent = obfs
+      ? `UDP port ${s.obfsPort}, disguised so it doesn't look like QUIC. Use it on networks that block QUIC.`
+      : `UDP port ${s.port}. Works on most networks.`;
+    if (!$("qr-dialog").open) $("qr-dialog").showModal();
   } catch (e) {
     toast(e.message, true);
   }
 }
+
+$("qr-standard").addEventListener("click", () => showQR(state.qrUser, false));
+$("qr-obfs").addEventListener("click", () => showQR(state.qrUser, true));
 
 $("qr-copy").addEventListener("click", async () => {
   try {
