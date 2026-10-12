@@ -66,7 +66,11 @@ func splitPort(addr string) (string, uint16, error) {
 
 // TCP dials reqAddr for the user core announced on this goroutine.
 func (o *Outbound) TCP(reqAddr string) (net.Conn, error) {
-	st := o.m.takeBinding()
+	return o.dialTCP(o.m.takeBinding(), reqAddr)
+}
+
+// dialTCP dials reqAddr for st (nil = unknown user, internet only).
+func (o *Outbound) dialTCP(st *userState, reqAddr string) (net.Conn, error) {
 	if st != nil && !st.allowedAt(o.m.now()) {
 		return nil, errDenied
 	}
@@ -129,12 +133,24 @@ func (c *tcpConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
+// CloseWrite half-closes the connection, so the destination sees the client's EOF.
+func (c *tcpConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
 // CheckUDP allows everything here; udpConn checks each packet's destination.
 func (o *Outbound) CheckUDP(string) error { return nil }
 
 // UDP opens a UDP session for the user core announced on this goroutine.
 func (o *Outbound) UDP(reqAddr string) (server.UDPConn, error) {
-	st := o.m.takeBinding()
+	return o.openUDP(o.m.takeBinding(), reqAddr)
+}
+
+// openUDP opens a UDP session for st (nil = unknown user, internet only).
+func (o *Outbound) openUDP(st *userState, reqAddr string) (*udpConn, error) {
 	if st != nil && !st.allowedAt(o.m.now()) {
 		return nil, errDenied
 	}

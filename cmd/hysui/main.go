@@ -149,9 +149,36 @@ func serve() error {
 		}
 	}
 
+	var reality *vpn.RealityServer
+	var realityLink *vpn.RealityLinkOptions
+	if cfg.RealityListen != "" {
+		keys, err := st.RealityKeys(func() (store.Reality, error) {
+			k, sid, err := vpn.NewRealityKeys()
+			return store.Reality{PrivateKey: k, ShortID: sid}, err
+		})
+		if err != nil {
+			return err
+		}
+		priv, sid, pub, err := vpn.ParseRealityKeys(keys.PrivateKey, keys.ShortID)
+		if err != nil {
+			return fmt.Errorf("reality keys in hysui.json: %w", err)
+		}
+		reality, err = vpn.NewRealityServer(vpn.RealityOptions{
+			Listen: cfg.RealityListen, Dest: cfg.RealityDest, ServerNames: []string{cfg.RealitySNI},
+			PrivateKey: priv, ShortID: sid,
+		}, mgr, log)
+		if err != nil {
+			return err
+		}
+		realityLink = &vpn.RealityLinkOptions{
+			Port: cfg.RealityPublicPort, ServerName: cfg.RealitySNI, PublicKey: pub, ShortID: keys.ShortID,
+		}
+	}
+
 	panel := web.New(web.Options{
 		Version: version, Store: st, Manager: mgr, Certs: certs, Policy: policy,
 		PublicPort: cfg.PublicPort, Listen: cfg.Listen, ObfsPort: cfg.ObfsPublicPort, ObfsPassword: obfsPassword,
+		Reality:        realityLink,
 		TrustedProxies: cfg.TrustedProxies, SecureCookies: cfg.SecureCookies, Log: log,
 	})
 	httpSrv := &http.Server{Addr: cfg.WebListen, Handler: panel, ReadHeaderTimeout: 10 * time.Second}
@@ -160,14 +187,18 @@ func serve() error {
 	flushed := make(chan struct{})
 	go func() { mgr.Run(stop); close(flushed) }()
 
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	go func() { errc <- fmt.Errorf("vpn: %w", hy.Serve()) }()
 	if hyObfs != nil {
 		go func() { errc <- fmt.Errorf("obfuscated vpn: %w", hyObfs.Serve()) }()
 	}
+	if reality != nil {
+		go func() { errc <- fmt.Errorf("vless reality: %w", reality.Serve()) }()
+	}
 	go func() { errc <- fmt.Errorf("panel: %w", httpSrv.ListenAndServe()) }()
 	log.Info("hysui started", "version", version, "vpn", cfg.Listen+"/udp", "panel", cfg.WebListen,
-		"domain", domains.Active, "tls", cfg.TLSMode, "users", len(st.Users()), "obfuscated", cfg.ObfsListen)
+		"domain", domains.Active, "tls", cfg.TLSMode, "users", len(st.Users()), "obfuscated", cfg.ObfsListen,
+		"reality", cfg.RealityListen, "reality_dest", cfg.RealityDest)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -186,6 +217,9 @@ func serve() error {
 	_ = hy.Close()
 	if hyObfs != nil {
 		_ = hyObfs.Close()
+	}
+	if reality != nil {
+		_ = reality.Close()
 	}
 	return err
 }

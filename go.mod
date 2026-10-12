@@ -6,6 +6,10 @@ require (
 	github.com/apernet/hysteria/core/v2 v2.12.3
 	github.com/apernet/hysteria/extras/v2 v2.12.3
 	github.com/caddyserver/certmagic v0.25.4
+	github.com/gofrs/uuid/v5 v5.3.2
+	github.com/metacubex/utls v1.8.7
+	github.com/sagernet/sing v0.9.7-0.20260929150544-0ad23b637bd4
+	github.com/sagernet/sing-vmess v0.2.9-0.20260929152519-9b95ab8c9478
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.uber.org/zap v1.28.0
 	go.yaml.in/yaml/v3 v3.0.5
@@ -30,7 +34,7 @@ require (
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
-	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
+	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect

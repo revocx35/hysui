@@ -19,6 +19,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,6 +50,7 @@ type Manager struct {
 
 	syncMu sync.Mutex
 	users  atomic.Pointer[map[string]*userState] // copy-on-write; read on every relayed chunk
+	gen    atomic.Uint64                         // bumped by every Sync
 
 	bindings       sync.Map // goroutine id -> user name, see package doc
 	warnedNoBinder atomic.Bool
@@ -64,7 +66,10 @@ type userState struct {
 	kickUntil  atomic.Int64 // unix nanos
 
 	tx, rx atomic.Int64 // lifetime totals: client upload / download
-	online atomic.Int32 // open connections
+	online atomic.Int32 // open Hysteria connections (one per device)
+
+	vlessMu  sync.Mutex
+	vlessIPs map[netip.Addr]int // open VLESS connections per client address
 
 	up, down         atomic.Pointer[rate.Limiter]
 	upMbps, downMbps float64 // guarded by Manager.syncMu
@@ -120,6 +125,7 @@ func (m *Manager) Sync() {
 		}
 	}
 	m.users.Store(&next)
+	m.gen.Add(1)
 }
 
 func newLimiter(mbps float64) *rate.Limiter {
@@ -223,6 +229,31 @@ func (m *Manager) LogTraffic(id string, tx, rx uint64) bool {
 	return true
 }
 
+// vlessOpen records an open VLESS connection from ip. VLESS opens a connection per
+// request, so each client address counts as one device.
+func (st *userState) vlessOpen(ip netip.Addr) {
+	st.vlessMu.Lock()
+	defer st.vlessMu.Unlock()
+	if st.vlessIPs == nil {
+		st.vlessIPs = map[netip.Addr]int{}
+	}
+	st.vlessIPs[ip]++
+}
+
+func (st *userState) vlessClose(ip netip.Addr) {
+	st.vlessMu.Lock()
+	defer st.vlessMu.Unlock()
+	if st.vlessIPs[ip]--; st.vlessIPs[ip] <= 0 {
+		delete(st.vlessIPs, ip)
+	}
+}
+
+func (st *userState) devices() int {
+	st.vlessMu.Lock()
+	defer st.vlessMu.Unlock()
+	return int(st.online.Load()) + len(st.vlessIPs)
+}
+
 func (m *Manager) LogOnlineState(id string, online bool) {
 	st := m.get(id)
 	if st == nil {
@@ -312,7 +343,7 @@ func (m *Manager) Stats() map[string]Stats {
 	out := map[string]Stats{}
 	for name, st := range *m.users.Load() {
 		out[name] = Stats{
-			Online:    int(st.online.Load()),
+			Online:    st.devices(),
 			Tx:        st.tx.Load(),
 			Rx:        st.rx.Load(),
 			SpeedTx:   st.speedTx.Load(),

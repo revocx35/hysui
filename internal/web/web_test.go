@@ -376,11 +376,11 @@ func TestObfuscatedLink(t *testing.T) {
 	p := newPanel(t)
 	p.login(adminPass)
 	p.do("POST", "/api/users", `{"name":"iphone"}`, nil)
-	if r := p.do("GET", "/api/users/iphone/link?obfs=1", "", nil); r.code != http.StatusBadRequest {
+	if r := p.do("GET", "/api/users/iphone/link?type=obfs", "", nil); r.code != http.StatusBadRequest {
 		t.Fatalf("obfuscated link while off: %d", r.code)
 	}
 	p.srv.o.ObfsPort, p.srv.o.ObfsPassword = 8443, "obfspassword"
-	r := p.do("GET", "/api/users/iphone/link?obfs=1", "", nil)
+	r := p.do("GET", "/api/users/iphone/link?type=obfs", "", nil)
 	if r.code != http.StatusOK || !strings.Contains(r.body, "@vpn.example.com:8443/") ||
 		!strings.Contains(r.body, "obfs=salamander") || !strings.Contains(r.body, "obfs-password=obfspassword") {
 		t.Fatalf("obfuscated link: %d %s", r.code, r.body)
@@ -389,6 +389,28 @@ func TestObfuscatedLink(t *testing.T) {
 		t.Fatalf("standard link changed: %s", r.body)
 	}
 	if r := p.do("GET", "/api/status", "", nil); !strings.Contains(r.body, `"obfsPort":8443`) {
+		t.Fatalf("status: %s", r.body)
+	}
+}
+
+func TestRealityLink(t *testing.T) {
+	p := newPanel(t)
+	p.login(adminPass)
+	p.do("POST", "/api/users", `{"name":"iphone"}`, nil)
+	if r := p.do("GET", "/api/users/iphone/link?type=reality", "", nil); r.code != http.StatusBadRequest {
+		t.Fatalf("reality link while off: %d", r.code)
+	}
+	if r := p.do("GET", "/api/users/iphone/link?type=bogus", "", nil); r.code != http.StatusBadRequest {
+		t.Fatalf("unknown type: %d", r.code)
+	}
+	p.srv.o.Reality = &vpn.RealityLinkOptions{Port: 443, ServerName: "www.example.org", PublicKey: "PUB", ShortID: "0123456789abcdef"}
+	r := p.do("GET", "/api/users/iphone/link?type=reality", "", nil)
+	for _, want := range []string{"vless://", "@vpn.example.com:443", "security=reality", "sni=www.example.org", "pbk=PUB", "flow=xtls-rprx-vision"} {
+		if !strings.Contains(r.body, want) {
+			t.Fatalf("reality link missing %q: %d %s", want, r.code, r.body)
+		}
+	}
+	if r := p.do("GET", "/api/status", "", nil); !strings.Contains(r.body, `"realityPort":443`) {
 		t.Fatalf("status: %s", r.body)
 	}
 }

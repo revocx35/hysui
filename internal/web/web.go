@@ -42,7 +42,8 @@ type Options struct {
 	PublicPort     int // UDP port in share links
 	ObfsPort       int // UDP port of the obfuscated listener in share links; 0 = none
 	ObfsPassword   string
-	Listen         string // VPN UDP listen address, for display
+	Reality        *vpn.RealityLinkOptions // nil = no VLESS Reality listener
+	Listen         string                  // VPN UDP listen address, for display
 	TrustedProxies []netip.Prefix
 	SecureCookies  string // auto, true, false
 	Log            *slog.Logger
@@ -305,19 +306,24 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		local = append(local, p.String())
 	}
 	domain := s.o.Store.Domains().Active
+	realityPort := 0
+	if s.o.Reality != nil {
+		realityPort = s.o.Reality.Port
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":    s.o.Version,
-		"domain":     domain,
-		"port":       s.o.PublicPort,
-		"obfsPort":   s.o.ObfsPort,
-		"listen":     s.o.Listen,
-		"cert":       s.o.Certs.Status(domain),
-		"uptimeSec":  int(s.o.Now().Sub(s.started).Seconds()),
-		"users":      len(users),
-		"online":     online,
-		"admin":      s.o.Store.Admin().Username,
-		"homeRanges": s.o.Policy.Home(),
-		"homeLocal":  local,
+		"version":     s.o.Version,
+		"domain":      domain,
+		"port":        s.o.PublicPort,
+		"obfsPort":    s.o.ObfsPort,
+		"realityPort": realityPort,
+		"listen":      s.o.Listen,
+		"cert":        s.o.Certs.Status(domain),
+		"uptimeSec":   int(s.o.Now().Sub(s.started).Seconds()),
+		"users":       len(users),
+		"online":      online,
+		"admin":       s.o.Store.Admin().Username,
+		"homeRanges":  s.o.Policy.Home(),
+		"homeLocal":   local,
 	})
 }
 
@@ -467,15 +473,31 @@ func (s *Server) userLink(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, store.ErrNotFound.Error())
 		return
 	}
-	link := vpn.LinkOptions{Host: s.o.Store.Domains().Active, Port: s.o.PublicPort, Pin: s.o.Certs.PinSHA256()}
-	if r.URL.Query().Get("obfs") == "1" {
+	host := s.o.Store.Domains().Active
+	link := vpn.LinkOptions{Host: host, Port: s.o.PublicPort, Pin: s.o.Certs.PinSHA256()}
+	var uri string
+	switch r.URL.Query().Get("type") {
+	case "", "standard":
+		uri = vpn.ShareLink(link, u)
+	case "obfs":
 		if s.o.ObfsPort == 0 {
 			writeErr(w, http.StatusBadRequest, "the obfuscated listener is off (set HYSUI_OBFS_LISTEN)")
 			return
 		}
 		link.Port, link.Obfs = s.o.ObfsPort, s.o.ObfsPassword
+		uri = vpn.ShareLink(link, u)
+	case "reality":
+		if s.o.Reality == nil {
+			writeErr(w, http.StatusBadRequest, "VLESS Reality is off (set HYSUI_REALITY_LISTEN)")
+			return
+		}
+		rl := *s.o.Reality
+		rl.Host = host
+		uri = vpn.RealityLink(rl, u)
+	default:
+		writeErr(w, http.StatusBadRequest, "type must be standard, obfs or reality")
+		return
 	}
-	uri := vpn.ShareLink(link, u)
 	png, err := qrcode.Encode(uri, qrcode.Medium, 320)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

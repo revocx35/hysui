@@ -109,15 +109,16 @@
     <div class="body">
       <h2 id="qr-title">Connect</h2>
       <div class="seg" id="qr-mode" role="group" aria-label="Connection type" hidden>
-        <button type="button" id="qr-standard" aria-pressed="true">Standard</button>
-        <button type="button" id="qr-obfs" aria-pressed="false">Obfuscated</button>
+        <button type="button" data-type="standard" aria-pressed="true">Standard</button>
+        <button type="button" data-type="obfs" aria-pressed="false">Obfuscated</button>
+        <button type="button" data-type="reality" aria-pressed="false">Reality</button>
       </div>
       <p class="muted" id="qr-mode-hint" hidden></p>
       <div class="qr">
         <img id="qr-img" alt="QR code for the client link">
         <code id="qr-uri"></code>
       </div>
-      <p class="muted">Scan with Hiddify, Karing, v2rayNG, Shadowrocket or another Hysteria 2 client, or copy the link.</p>
+      <p class="muted">Scan with Hiddify, Karing, v2rayNG, Shadowrocket or a similar app, or copy the link.</p>
       <div class="dialog-actions">
         <button type="button" class="btn" id="qr-copy">Copy link</button>
         <button type="button" class="btn primary" data-close>Done</button>

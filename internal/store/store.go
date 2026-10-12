@@ -115,6 +115,7 @@ type data struct {
 	Admin   Admin   `json:"admin"`
 	Domains Domains `json:"domains,omitzero"`
 	Obfs    string  `json:"obfsPassword,omitempty"`
+	Reality Reality `json:"reality,omitzero"`
 	Users   []User  `json:"users"`
 }
 
@@ -206,6 +207,31 @@ func (s *Store) ObfsPassword(gen func() string) (string, error) {
 		return "", err
 	}
 	return s.d.Obfs, nil
+}
+
+// Reality holds the VLESS Reality server keys.
+type Reality struct {
+	PrivateKey string `json:"privateKey"` // X25519, base64url
+	ShortID    string `json:"shortId"`    // hex
+}
+
+// RealityKeys returns the Reality keys, generating and saving them with gen on first use.
+func (s *Store) RealityKeys(gen func() (Reality, error)) (Reality, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.d.Reality.PrivateKey != "" {
+		return s.d.Reality, nil
+	}
+	r, err := gen()
+	if err != nil {
+		return Reality{}, err
+	}
+	s.d.Reality = r
+	if err := s.saveLocked(); err != nil {
+		s.d.Reality = Reality{}
+		return Reality{}, err
+	}
+	return r, nil
 }
 
 // Domains returns the domain list.

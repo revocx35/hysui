@@ -177,3 +177,20 @@ func TestObfsPassword(t *testing.T) {
 		t.Fatalf("not persisted: %q, generated %d times", p, calls)
 	}
 }
+
+func TestRealityKeysPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hysui.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	gen := func() (Reality, error) { calls++; return Reality{PrivateKey: "k", ShortID: "01"}, nil }
+	if r, err := s.RealityKeys(gen); err != nil || r.PrivateKey != "k" {
+		t.Fatalf("first: %+v %v", r, err)
+	}
+	s2, _ := Open(path)
+	if r, _ := s2.RealityKeys(gen); r.PrivateKey != "k" || r.ShortID != "01" || calls != 1 {
+		t.Fatalf("not persisted: %+v, generated %d times", r, calls)
+	}
+}

@@ -31,6 +31,12 @@ type Config struct {
 	ObfsPublicPort int
 	ObfsPassword   string // empty = generated once and kept in the data directory
 
+	// Optional VLESS + Reality listener (TCP), for networks with strong DPI.
+	RealityListen     string
+	RealityPublicPort int
+	RealityDest       string // host:port of the real website to look like
+	RealitySNI        string // name clients send; defaults to RealityDest's host
+
 	TLSMode     string
 	ACMEEmail   string
 	ACMECA      string
@@ -70,6 +76,9 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		Masquerade:    env("MASQUERADE_URL", ""),
 		ObfsListen:    env("OBFS_LISTEN", ""),
 		ObfsPassword:  env("OBFS_PASSWORD", ""),
+		RealityListen: env("REALITY_LISTEN", ""),
+		RealityDest:   env("REALITY_DEST", "www.microsoft.com:443"),
+		RealitySNI:    strings.ToLower(env("REALITY_SNI", "")),
 		WebListen:     env("WEB_LISTEN", ":8080"),
 		SecureCookies: strings.ToLower(env("SECURE_COOKIES", "auto")),
 		DataDir:       env("DATA_DIR", "/data"),
@@ -97,6 +106,23 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		}
 		if c.ObfsListen == c.Listen {
 			errs = append(errs, errors.New("HYSUI_OBFS_LISTEN must differ from HYSUI_LISTEN"))
+		}
+	}
+	if c.RealityListen != "" {
+		_, rp, err := net.SplitHostPort(c.RealityListen)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("HYSUI_REALITY_LISTEN: %w", err))
+		}
+		c.RealityPublicPort, err = strconv.Atoi(env("REALITY_PUBLIC_PORT", rp))
+		if err != nil || c.RealityPublicPort < 1 || c.RealityPublicPort > 65535 {
+			errs = append(errs, errors.New("HYSUI_REALITY_PUBLIC_PORT must be a port number"))
+		}
+		host, _, err := net.SplitHostPort(c.RealityDest)
+		if err != nil || host == "" {
+			errs = append(errs, errors.New("HYSUI_REALITY_DEST must be host:port, e.g. www.microsoft.com:443"))
+		}
+		if c.RealitySNI == "" {
+			c.RealitySNI = strings.ToLower(host)
 		}
 	}
 	if c.ObfsPassword != "" && len(c.ObfsPassword) < 8 {

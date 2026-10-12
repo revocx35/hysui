@@ -15,6 +15,7 @@ A [Hysteria 2](https://v2.hysteria.network/) VPN server with a web panel for man
 - **Domains**: add more domains and switch the one that QR codes use, from the panel. The other domains keep their certificates, so devices set up with an older link still connect while you move users over.
 - **Certificates**: Let's Encrypt (HTTP or TLS challenge), your own certificate files (reloaded when they change) or self-signed with pinning.
 - **Obfuscated port**: an optional second VPN port with Hysteria's Salamander obfuscation, for networks that block QUIC. The QR dialog gives both links.
+- **VLESS Reality**: an optional TCP listener for networks with strong DPI where UDP-based links fail. To anyone without the key it is a real website. Same users, limits, quotas and home-network rules as Hysteria.
 - **Masquerade**: unauthenticated probes see a normal website (any URL you choose) instead of a VPN.
 - **Import**: take over users from an existing Hysteria server config, so phones keep working without rescanning.
 
@@ -40,7 +41,7 @@ It uses host networking. That way the VPN sees real client addresses, can reach 
 ### Without Docker
 
 ```bash
-go build -o hysui ./cmd/hysui
+go build -tags with_utls -o hysui ./cmd/hysui
 sudo HYSUI_DOMAIN=vpn.example.com HYSUI_DATA_DIR=/var/lib/hysui ./hysui
 ```
 
@@ -56,6 +57,10 @@ Everything is set with environment variables (see [.env.example](.env.example)):
 | `HYSUI_OBFS_LISTEN` | | UDP address of an extra, obfuscated VPN port (e.g. `:8443`), for networks that block QUIC. Off when empty. |
 | `HYSUI_OBFS_PUBLIC_PORT` | obfs listen port | Port written into obfuscated client links. |
 | `HYSUI_OBFS_PASSWORD` | random | Obfuscation password shared by all users. Generated on first start and kept in `data/hysui.json` if empty. |
+| `HYSUI_REALITY_LISTEN` | | TCP address of a VLESS Reality listener (e.g. `:443`), for networks with strong DPI. Off when empty. |
+| `HYSUI_REALITY_PUBLIC_PORT` | reality listen port | Port written into Reality client links. |
+| `HYSUI_REALITY_DEST` | `www.microsoft.com:443` | Real website the listener impersonates. It must support TLS 1.3 and HTTP/2 and be reachable from the server. |
+| `HYSUI_REALITY_SNI` | host of `HYSUI_REALITY_DEST` | Server name clients send. Must be a name the site serves. |
 | `HYSUI_WEB_LISTEN` | `:8080` | Address of the panel (plain HTTP). |
 | `HYSUI_ADMIN_USER` / `HYSUI_ADMIN_PASSWORD` | `admin` / random | Panel login created on first start. A random password is printed to the log. |
 | `HYSUI_TLS_MODE` | `acme-http` | `acme-http`, `acme-tls`, `file` or `self-signed`. |
@@ -88,7 +93,15 @@ The list is stored in `data/hysui.json`. `HYSUI_DOMAIN` is only read on first st
 
 Hysteria runs over QUIC, which some networks recognize and drop. Set `HYSUI_OBFS_LISTEN=:8443` (and forward that UDP port on your router) to add a second VPN port with Salamander obfuscation: every packet is scrambled, so the traffic no longer looks like QUIC. The normal port keeps working as before. In the panel, the QR dialog then has a **Standard / Obfuscated** switch.
 
-This does not help on networks that block UDP entirely.
+This does not help on networks that block UDP entirely; use VLESS Reality there.
+
+### Networks with strong DPI: VLESS Reality
+
+Set `HYSUI_REALITY_LISTEN=:443` and forward **TCP** 443 to the server. hysui then also accepts VLESS over Reality with the XTLS Vision flow. To the network, a client's connection is a TLS 1.3 visit to `HYSUI_REALITY_DEST` (www.microsoft.com by default). Anyone probing the port, or connecting without the server's key, is passed through to that real site and sees its genuine certificate. The server keys are generated on first start and kept in `data/hysui.json`.
+
+In the panel, the QR dialog then has a **Reality** option. Each user's VLESS ID is derived from their name and password, so changing the password also invalidates their Reality link. Speed limits, quotas, home-network access, disabling and disconnecting apply as for Hysteria. Reality runs over TCP, so it is slower than Hysteria on lossy networks; use it where Hysteria is blocked.
+
+Clients: Hiddify, v2rayNG, Karing, NekoBox, Shadowrocket and other Xray or sing-box based apps.
 
 ### What counts as "home network"
 
@@ -156,8 +169,8 @@ The core version is pinned in `go.mod`. Upgrades are verified by the integration
 ## Development
 
 ```bash
-go test -race ./...      # unit + integration tests (starts real Hysteria servers on localhost)
-go run ./cmd/hysui       # with HYSUI_DOMAIN=localhost HYSUI_TLS_MODE=self-signed HYSUI_DATA_DIR=./data
+go test -race -tags with_utls ./...   # unit + integration tests (starts real Hysteria servers on localhost)
+go run -tags with_utls ./cmd/hysui    # with HYSUI_DOMAIN=localhost HYSUI_TLS_MODE=self-signed HYSUI_DATA_DIR=./data
 ```
 
 ## License
