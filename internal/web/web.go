@@ -111,6 +111,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
+	if r.URL.Path == "/" || r.URL.Path == "/login" {
+		h.Set("Cache-Control", "no-store") // the panel shell is private; don't leave it in caches
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		h.Set("Cache-Control", "no-store")
 		if r.Method != http.MethodGet && !sameOrigin(r) {
@@ -262,7 +265,17 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	admin := s.o.Store.Admin()
+	// Same throttle as the login: a stolen session must not allow guessing the
+	// current password without limit.
+	ip := clientIP(r, s.o.TrustedProxies).String()
+	account := strings.ToLower(admin.Username)
+	if wait := s.throttle.Wait(ip, account); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds()+0.999)))
+		writeErr(w, http.StatusTooManyRequests, "too many failed attempts, try again in "+wait.Round(time.Second).String())
+		return
+	}
 	if bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(in.Current)) != nil {
+		s.throttle.Fail(ip, account)
 		writeErr(w, http.StatusForbidden, "current password is wrong")
 		return
 	}

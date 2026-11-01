@@ -414,3 +414,28 @@ func TestRealityLink(t *testing.T) {
 		t.Fatalf("status: %s", r.body)
 	}
 }
+
+func TestChangePasswordThrottled(t *testing.T) {
+	p := newPanel(t)
+	p.login(adminPass)
+	body := `{"current":"nope","new":"another long password"}`
+	for i := 0; i < 6; i++ {
+		if r := p.do("POST", "/api/admin/password", body, nil); r.code != http.StatusForbidden {
+			t.Fatalf("attempt %d: %d", i, r.code)
+		}
+	}
+	// Even the right current password is refused while the delay runs.
+	r := p.do("POST", "/api/admin/password", `{"current":"`+adminPass+`","new":"another long password"}`, nil)
+	if r.code != http.StatusTooManyRequests {
+		t.Fatalf("not throttled: %d", r.code)
+	}
+}
+
+func TestPanelPagesNoStore(t *testing.T) {
+	p := newPanel(t)
+	for _, path := range []string{"/login", "/"} {
+		if cc := p.do("GET", path, "", nil).hdr.Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("%s: Cache-Control %q", path, cc)
+		}
+	}
+}
